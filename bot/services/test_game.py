@@ -58,11 +58,13 @@ class TestGameManager:
         games: GameManager,
         phases: PhaseManager,
         notifier: Notifier,
+        groups=None,
     ) -> None:
         self.session_factory = session_factory
         self.games = games
         self.phases = phases
         self.notifier = notifier
+        self.groups = groups  # GroupService (опционально)
         # game_id -> {"task": asyncio.Task, "auto": bool, "include_admin": bool}
         self._supervisors: dict[int, dict] = {}
 
@@ -72,28 +74,42 @@ class TestGameManager:
         self,
         admin_user_id: int,
         players_count: int,
+        fast: bool = False,
+        group_id: int | None = None,
         supervisor_interval: float = 1.0,
         auto_include_admin: bool = False,
     ) -> tuple[int | None, str]:
         """Создаёт игру: 1 реальный админ + (players_count-1) ботов.
 
-        Тайминги ускоренные (по 6 секунд на фазу), старт через 2 секунды.
+        fast=True: таймеры по 5 секунд. group_id: игра привязывается к группе
+        (локальная статистика/настройки DEBUG тестируются на этой группе).
+        Использует ТОЛЬКО реальные сервисы (GameManager/PhaseManager/VoteManager).
         """
         if not (4 <= players_count <= 8):
             return None, "Игроков должно быть от 4 до 8."
 
         bots_count = players_count - 1
         mafia = 2 if players_count >= 7 else 1
+        phase_seconds = 5 if fast else 6
         settings = {
             "roles": {"mafia": mafia, "detective": 1, "doctor": 1},
-            "night_seconds": 6,
-            "day_seconds": 6,
-            "vote_seconds": 6,
+            "night_seconds": phase_seconds,
+            "day_seconds": phase_seconds,
+            "vote_seconds": phase_seconds,
             "start_countdown_seconds": 2,
             "tie_rule": "revote",
             "reveal_roles_on_death": True,
             "test_mode": True,
         }
+        if group_id:
+            # Правила игры берём из настроек группы, если они строже
+            group_settings = await self.groups.get_settings(group_id) if self.groups else None
+            if group_settings is not None:
+                settings["night_seconds"] = max(5, min(phase_seconds, group_settings.night_seconds))
+                settings["day_seconds"] = max(5, min(phase_seconds, group_settings.discussion_seconds or group_settings.day_seconds))
+                settings["vote_seconds"] = max(5, min(phase_seconds, group_settings.vote_seconds))
+                settings["tie_rule"] = group_settings.tie_rule if group_settings.tie_rule in ("revote", "no_death") else "revote"
+                settings["reveal_roles_on_death"] = group_settings.role_reveal_on_death
 
         async with self.session_factory() as session:
             admin = await UserRepository(session).get_by_id(admin_user_id)
@@ -129,6 +145,7 @@ class TestGameManager:
                 is_private=True,  # не попадает в общий список комнат
                 status=RoomStatus.OPEN.value,
                 settings=settings,
+                group_id=group_id,
             )
             session.add(room)
             await session.flush()
@@ -152,7 +169,8 @@ class TestGameManager:
             game_id = (await RoomRepository(session).get(room_id)).game_id
         self.start_supervisor(game_id, interval=supervisor_interval, include_admin=auto_include_admin)
         logger.info(
-            "ТЕСТ-РЕЖИМ: создана игра %s (%s игроков, админ=%s)", game_id, players_count, admin_user_id
+            "ТЕСТ-РЕЖИМ: создана игра %s (%s игроков, админ=%s, fast=%s, группа=%s)",
+            game_id, players_count, admin_user_id, fast, group_id,
         )
         await self.dump_state(game_id)
         return game_id, f"🧪 Тестовая игра #{game_id} создана: {players_count} участников."

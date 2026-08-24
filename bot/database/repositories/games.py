@@ -28,6 +28,23 @@ class GameRepository(BaseRepository[Game]):
         )
         return list(result.scalars().unique().all())
 
+    async def active_for_group(self, group_id: int) -> list[Game]:
+        result = await self.session.execute(
+            select(Game)
+            .where(Game.group_id == group_id, Game.status.in_(ACTIVE_STATUSES))
+            .order_by(Game.created_at.desc())
+        )
+        return list(result.scalars().unique().all())
+
+    async def finished_for_group(self, group_id: int, limit: int = 10) -> list[Game]:
+        result = await self.session.execute(
+            select(Game)
+            .where(Game.group_id == group_id, Game.status == GameStatus.ENDED.value)
+            .order_by(Game.ended_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().unique().all())
+
     async def count_active(self) -> int:
         result = await self.session.execute(
             select(func.count()).select_from(Game).where(Game.status.in_(ACTIVE_STATUSES))

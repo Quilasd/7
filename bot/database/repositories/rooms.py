@@ -35,6 +35,15 @@ class RoomRepository(BaseRepository[Room]):
         )
         return result.scalars().unique().one_or_none()
 
+    async def for_group(self, group_id: int, limit: int = 10) -> list[Room]:
+        result = await self.session.execute(
+            select(Room)
+            .where(Room.group_id == group_id, Room.status == RoomStatus.OPEN.value)
+            .order_by(Room.created_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().unique().all())
+
     async def count_open(self) -> int:
         from sqlalchemy import func
 

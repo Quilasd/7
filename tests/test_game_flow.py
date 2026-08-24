@@ -153,10 +153,12 @@ class TestPhaseFlow:
             winner_user = await user_repo.get_by_id(citizen_uid)
             assert winner_user.games_played == 1
             assert winner_user.wins == 1
-            assert winner_user.rating > 1000
+            # победа 100 + выживание 10 + правильный голос 2
+            assert winner_user.rating == 112
+            assert winner_user.xp == 42  # участие 10 + победа 25 + выживание 5 + голос 2
             mafia_user = await user_repo.get_by_id(mafia_uid)
             assert mafia_user.losses == 1
-            assert mafia_user.rating < 1000
+            assert mafia_user.rating == 30  # поражение 25 + убийство 5
 
     async def test_night_action_validations(self, services, session):
         users = [await make_user(session, f"P{i}") for i in range(1, 7)]
@@ -354,7 +356,7 @@ class TestPhaseFlow:
             assert game.winner == "draw"
             user = await UserRepository(s).get_by_id(users[0].id)
             assert user.games_played == 1
-            assert user.rating == 1000  # рейтинг не тронут
+            assert user.rating == 0  # рейтинг не тронут (старт 0)
 
 
 class TestRecovery:

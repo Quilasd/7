@@ -1,10 +1,15 @@
 from bot.database.database import create_engine, create_session_factory, dispose_engine, init_db
 from bot.database.models import (
     AppSetting,
+    AuditLog,
     Game,
     GameAction,
     GamePlayer,
     GameStatus,
+    Group,
+    GroupAdmin,
+    GroupPlayer,
+    GroupSettingsModel,
     PlayerStatus,
     Room,
     RoomPlayer,
@@ -16,10 +21,15 @@ from bot.database.models import (
 
 __all__ = [
     "AppSetting",
+    "AuditLog",
     "Game",
     "GameAction",
     "GamePlayer",
     "GameStatus",
+    "Group",
+    "GroupAdmin",
+    "GroupPlayer",
+    "GroupSettingsModel",
     "PlayerStatus",
     "Room",
     "RoomPlayer",

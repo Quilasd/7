@@ -8,7 +8,7 @@ from bot.roles import all_roles
 from bot.utils.callbacks import AdminCB
 
 
-def admin_panel_kb() -> InlineKeyboardMarkup:
+def admin_panel_kb(debug_mode: bool = False) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="📊 Статистика", callback_data=AdminCB(action="stats").pack())],
         [
@@ -28,6 +28,13 @@ def admin_panel_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="⚙️ Параметры", callback_data=AdminCB(action="gparams").pack()),
         ],
     ]
+    if debug_mode:
+        # DEBUG MODE: тестовые игры с ботами (/testgame)
+        rows.append([
+            InlineKeyboardButton(
+                text="🧪 Тестовая игра", callback_data=AdminCB(action="testgame").pack()
+            )
+        ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

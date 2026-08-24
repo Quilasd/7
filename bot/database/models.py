@@ -13,6 +13,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     DateTime,
     ForeignKey,
@@ -81,9 +82,10 @@ class User(Base):
     losses: Mapped[int] = mapped_column(Integer, default=0)
     kills: Mapped[int] = mapped_column(Integer, default=0)
     saves: Mapped[int] = mapped_column(Integer, default=0)
+    investigations: Mapped[int] = mapped_column(Integer, default=0)
     correct_votes: Mapped[int] = mapped_column(Integer, default=0)
 
-    rating: Mapped[int] = mapped_column(Integer, default=1000)
+    rating: Mapped[int] = mapped_column(Integer, default=0)
     level: Mapped[int] = mapped_column(Integer, default=1)
     xp: Mapped[int] = mapped_column(Integer, default=0)
 
@@ -111,6 +113,7 @@ class Room(Base):
     status: Mapped[str] = mapped_column(String(16), default=RoomStatus.OPEN.value, index=True)
     settings: Mapped[dict] = mapped_column(JSON, default=dict)  # RoomSettings.model_dump()
     game_id: Mapped[int | None] = mapped_column(ForeignKey("games.id"), nullable=True)
+    group_id: Mapped[int | None] = mapped_column(ForeignKey("groups.id"), nullable=True, index=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -146,6 +149,7 @@ class Game(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     room_id: Mapped[int | None] = mapped_column(ForeignKey("rooms.id"), nullable=True, index=True)
+    group_id: Mapped[int | None] = mapped_column(ForeignKey("groups.id"), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(16), default=GameStatus.STARTING.value, index=True)
     max_players: Mapped[int] = mapped_column(Integer, default=10)
     day_number: Mapped[int] = mapped_column(Integer, default=0)
@@ -239,3 +243,119 @@ class AppSetting(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[dict] = mapped_column(JSON, default=dict)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+# --- Группы, локальная статистика, администрация -------------------------------
+
+
+class Group(Base):
+    """Telegram-группа со своими настройками, админами и локальными рейтингами."""
+
+    __tablename__ = "groups"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    telegram_chat_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    title: Mapped[str] = mapped_column(String(128), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<Group id={self.id} chat={self.telegram_chat_id} {self.title!r}>"
+
+
+class GroupPlayer(Base):
+    """Участник группы и его ЛОКАЛЬНАЯ статистика (полностью отделена от User)."""
+
+    __tablename__ = "group_players"
+    __table_args__ = (
+        UniqueConstraint("group_id", "user_id", name="uq_group_player"),
+        Index("ix_group_players_top", "group_id", "rating"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+
+    # Локальная статистика
+    games_played: Mapped[int] = mapped_column(Integer, default=0)
+    wins: Mapped[int] = mapped_column(Integer, default=0)
+    losses: Mapped[int] = mapped_column(Integer, default=0)
+    kills: Mapped[int] = mapped_column(Integer, default=0)
+    saves: Mapped[int] = mapped_column(Integer, default=0)
+    investigations: Mapped[int] = mapped_column(Integer, default=0)
+    correct_votes: Mapped[int] = mapped_column(Integer, default=0)
+    rating: Mapped[int] = mapped_column(Integer, default=0)
+    xp: Mapped[int] = mapped_column(Integer, default=0)
+    level: Mapped[int] = mapped_column(Integer, default=1)
+
+    # Модерация внутри группы
+    warnings: Mapped[int] = mapped_column(Integer, default=0)
+    is_banned: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    joined_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+    user: Mapped[User] = relationship(lazy="joined")
+
+
+class GroupAdmin(Base):
+    """Администратор группы с уровнем 1..5 (см. AdminLevel)."""
+
+    __tablename__ = "group_admins"
+    __table_args__ = (
+        UniqueConstraint("group_id", "user_id", name="uq_group_admin"),
+        Index("ix_group_admins_group", "group_id", "admin_level"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    admin_level: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    created_by: Mapped[int] = mapped_column(Integer, default=0)
+
+    user: Mapped[User] = relationship(lazy="joined")
+
+
+class GroupSettingsModel(Base):
+    """Настройки правил игры конкретной группы (Mafia Online)."""
+
+    __tablename__ = "group_settings"
+
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), primary_key=True)
+    min_players: Mapped[int] = mapped_column(Integer, default=4)
+    max_players: Mapped[int] = mapped_column(Integer, default=10)
+    night_seconds: Mapped[int] = mapped_column(Integer, default=90)
+    day_seconds: Mapped[int] = mapped_column(Integer, default=180)
+    discussion_seconds: Mapped[int] = mapped_column(Integer, default=180)
+    vote_seconds: Mapped[int] = mapped_column(Integer, default=60)
+    tie_rule: Mapped[str] = mapped_column(String(16), default="revote")
+    role_reveal_on_death: Mapped[bool] = mapped_column(Boolean, default=True)
+    enabled_roles: Mapped[list] = mapped_column(JSON, default=list)  # пусто = все роли
+    mafia_count: Mapped[int] = mapped_column(Integer, default=1)
+    allow_maniac: Mapped[bool] = mapped_column(Boolean, default=True)
+    xp_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    rating_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    global_xp_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    local_xp_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    global_rating_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    local_rating_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    debug_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class AuditLog(Base):
+    """Журнал административных действий."""
+
+    __tablename__ = "audit_logs"
+    __table_args__ = (
+        Index("ix_audit_group", "group_id", "created_at"),
+        Index("ix_audit_actor", "actor_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    actor_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    target_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    group_id: Mapped[int | None] = mapped_column(ForeignKey("groups.id"), nullable=True)
+    action: Mapped[str] = mapped_column(String(48))
+    details: Mapped[str] = mapped_column(String(512), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

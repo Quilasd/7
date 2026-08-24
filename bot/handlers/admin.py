@@ -44,7 +44,10 @@ def _is_admin(user_id: int) -> bool:
 async def cmd_admin(message: Message) -> None:
     if not _is_admin(message.from_user.id):
         return
-    await message.answer("🛠 <b>АДМИН-ПАНЕЛЬ</b>\n\nВыбери раздел:", reply_markup=admin_panel_kb())
+    await message.answer(
+        "🛠 <b>АДМИН-ПАНЕЛЬ</b>\n\nВыбери раздел:",
+        reply_markup=admin_panel_kb(debug_mode=get_settings().debug_mode),
+    )
 
 
 async def _guard(callback: CallbackQuery) -> bool:
@@ -59,7 +62,31 @@ async def cb_admin_panel(callback: CallbackQuery) -> None:
     if not await _guard(callback):
         return
     await callback.answer()
-    await edit_or_answer(callback, "🛠 <b>АДМИН-ПАНЕЛЬ</b>\n\nВыбери раздел:", admin_panel_kb())
+    await edit_or_answer(
+        callback,
+        "🛠 <b>АДМИН-ПАНЕЛЬ</b>\n\nВыбери раздел:",
+        admin_panel_kb(debug_mode=get_settings().debug_mode),
+    )
+
+
+@router.callback_query(AdminCB.filter(F.action == "testgame"))
+async def cb_admin_testgame(callback: CallbackQuery) -> None:
+    """🧪 Тестовая игра: показать меню DEBUG MODE."""
+    if not await _guard(callback):
+        return
+    settings = get_settings()
+    if not settings.debug_mode:
+        await callback.answer("DEBUG_MODE выключен в .env", show_alert=True)
+        return
+    from bot.keyboards.testgame import test_players_count_kb
+
+    await callback.answer()
+    await edit_or_answer(
+        callback,
+        "🧪 <b>ТЕСТОВЫЙ РЕЖИМ</b>\n\nВыбери количество участников:\n"
+        "(подробности: /testgame)",
+        test_players_count_kb(),
+    )
 
 
 @router.callback_query(AdminCB.filter(F.action == "stats"))

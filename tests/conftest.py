@@ -7,13 +7,16 @@ import asyncio
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
 
 from bot.database.database import init_db
 from bot.database.models import Room, RoomPlayer, User
 from bot.services.app_config import AppConfigService
+from bot.services.audit import AuditService
 from bot.services.game_manager import GameManager
+from bot.services.groups import GroupService
+from bot.services.permissions import PermissionService
 from bot.services.phase_manager import GameLocks, PhaseManager
+from bot.services.rating import RatingService
 from bot.services.rooms import RoomService
 from bot.services.test_game import TestGameManager
 from bot.services.timer_manager import NoopTimerManager
@@ -28,6 +31,22 @@ class SettingsStub:
     min_players_limit = 4
     max_players_limit = 20
     debug_mode = True
+    debug_affects_global_stats = False
+    debug_affects_local_stats = False
+    _admins: list[int] = []
+    _owners: list[int] = []
+
+    def is_admin(self, telegram_id: int) -> bool:
+        return telegram_id in self._admins
+
+    def is_owner(self, telegram_id: int) -> bool:
+        return telegram_id in self._owners
+
+    def admin_id_list(self) -> list[int]:
+        return list(self._admins)
+
+    def owner_id_list(self) -> list[int]:
+        return list(self._owners)
 
 
 @pytest.fixture()
@@ -36,11 +55,15 @@ def event_loop_policy():
 
 
 @pytest_asyncio.fixture()
-async def engine():
+async def engine(tmp_path):
+    # Файловая SQLite на тест: сессии получают РАЗНЫЕ соединения из пула.
+    # StaticPool + :memory: даёт одно общее соединение, и транзакции
+    # параллельных сессий (супервизор тест-игры + игровой цикл) ломают
+    # друг друга: чужой rollback откатывает не закоммиченные записи.
+    db_file = tmp_path / "test.db"
     engine = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
+        f"sqlite+aiosqlite:///{db_file}",
+        connect_args={"timeout": 30},
     )
     await init_db(engine)
     yield engine
@@ -68,11 +91,18 @@ async def services(session_factory, notifier):
     """Полный контейнер сервисов с фейковым нотификатором и без таймеров."""
     timers = NoopTimerManager()
     locks = GameLocks()
-    phases = PhaseManager(session_factory, notifier, timers, locks)
+    app_settings = SettingsStub()
+    rating = RatingService()
+    phases = PhaseManager(
+        session_factory, notifier, timers, locks, rating=rating, app_settings=app_settings
+    )
     games = GameManager(session_factory, notifier, phases, locks)
     app_config = AppConfigService(session_factory, SettingsStub())
     rooms = RoomService(session_factory, notifier, app_config)
-    test_games = TestGameManager(session_factory, games, phases, notifier)
+    permissions = PermissionService(app_settings)
+    groups = GroupService(session_factory, permissions)
+    audit = AuditService(session_factory)
+    test_games = TestGameManager(session_factory, games, phases, notifier, groups=groups)
     container = type("Services", (), {})()
     container.session_factory = session_factory
     container.notifier = notifier
@@ -82,7 +112,12 @@ async def services(session_factory, notifier):
     container.app_config = app_config
     container.rooms = rooms
     container.test_games = test_games
-    container.settings = SettingsStub()
+    container.settings = app_settings
+    container.permissions = permissions
+    container.groups = groups
+    container.audit = audit
+    container.rating = rating
+    container.maintenance = None
     yield container
     test_games.stop_all()
     timers.cancel_all()

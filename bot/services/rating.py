@@ -1,39 +1,78 @@
-"""Рейтинг, уровни и опыт.
+"""Рейтинг и XP: глобальный (User) и локальный (GroupPlayer) — физически разделены.
 
-Формулы (выбраны простые и объяснимые, см. README):
-- победа города/мафии: +25 рейтинга; поражение: −12 (не ниже 0);
-- победа маньяка: +40 (соло-победа сложнее);
-- XP: 10 за участие, +25 за победу, +5 за каждое убийство, +5 за спасение,
-  +2 за правильное голосование;
-- уровень — квадратичная шкала (100 XP до 2-го, дальше +50 за уровень).
+RatingService — единственное место с формулами:
+- рейтинг: победа +100, поражение +25, плюс бонусы за вклад
+  (убийства/спасения/расследования/правильные голосования/выживание);
+- XP: участие +10, победа +25, убийство +5, спасение +5, расследование +3,
+  правильное голосование +2, выживание +5.
+
+Значения собраны в RatingRules — меняются одной структурой.
+Антифарм: при ничьей/принудительной остановке XP и рейтинг НЕ начисляются
+(только games_played), а статистика применяется только в _end_game
+нормально завершённой игры.
+
+Скоупы применяются независимо:
+- GLOBAL -> строки User (глобальные поля);
+- GROUP  -> строки GroupPlayer ТОЛЬКО конкретной группы.
+
+Формулы НЕ живут в хендлерах: хендлеры лишь вызывают RatingService.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from enum import Enum
 
-from bot.database.models import User, WinningSide
-from bot.utils.helpers import level_from_xp
+from bot.services.progression import ProgressionService
 
 logger = logging.getLogger(__name__)
 
-WIN_RATING = {WinningSide.CITY: 25, WinningSide.MAFIA: 25, WinningSide.MANIAC: 40}
-LOSS_RATING = -12
-XP_PARTICIPATION = 10
-XP_WIN = 25
-XP_KILL = 5
-XP_SAVE = 5
-XP_CORRECT_VOTE = 2
+
+class RatingScope(str, Enum):
+    GLOBAL = "global"
+    GROUP = "group"
 
 
 @dataclass
 class StatEvents:
-    """События игры для начисления личной статистики."""
+    """Личный вклад за игру: user_id -> счётчики."""
 
-    kills: dict[int, int] = field(default_factory=dict)          # user_id -> кол-во
+    kills: dict[int, int] = field(default_factory=dict)
     saves: dict[int, int] = field(default_factory=dict)
+    investigations: dict[int, int] = field(default_factory=dict)
     correct_votes: dict[int, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RatingRules:
+    # Рейтинг
+    rating_win: int = 100
+    rating_loss: int = 25
+    rating_per_kill: int = 5
+    rating_per_save: int = 5
+    rating_per_investigation: int = 3
+    rating_per_correct_vote: int = 2
+    rating_survival: int = 10
+    # XP
+    xp_participation: int = 10
+    xp_win: int = 25
+    xp_per_kill: int = 5
+    xp_per_save: int = 5
+    xp_per_investigation: int = 3
+    xp_per_correct_vote: int = 2
+    xp_survival: int = 5
+
+
+DEFAULT_RULES = RatingRules()
+
+
+@dataclass
+class ScopeFlags:
+    """Какие показатели включены (из GroupSettings + DEBUG-флагов)."""
+
+    rating: bool = True
+    xp: bool = True
 
 
 @dataclass
@@ -42,45 +81,119 @@ class AppliedStats:
     xp_delta: dict[int, int] = field(default_factory=dict)
 
 
-def apply_game_results(
-    users_by_id: dict[int, User],
-    winners: set[int],
-    side: WinningSide,
-    events: StatEvents,
-) -> AppliedStats:
-    """Обновляет статистику пользователей in-memory (коммит — задача вызывающего)."""
-    applied = AppliedStats()
+def contribution(rules: RatingRules, user_id: int, events: StatEvents, survived: bool) -> tuple[int, int]:
+    """(дельта рейтинга за вклад, дельта XP за вклад)."""
+    rating = (
+        events.kills.get(user_id, 0) * rules.rating_per_kill
+        + events.saves.get(user_id, 0) * rules.rating_per_save
+        + events.investigations.get(user_id, 0) * rules.rating_per_investigation
+        + events.correct_votes.get(user_id, 0) * rules.rating_per_correct_vote
+        + (rules.rating_survival if survived else 0)
+    )
+    xp = (
+        events.kills.get(user_id, 0) * rules.xp_per_kill
+        + events.saves.get(user_id, 0) * rules.xp_per_save
+        + events.investigations.get(user_id, 0) * rules.xp_per_investigation
+        + events.correct_votes.get(user_id, 0) * rules.xp_per_correct_vote
+        + (rules.xp_survival if survived else 0)
+    )
+    return rating, xp
 
-    for user_id, user in users_by_id.items():
-        if user is None:
-            continue
-        is_draw = side in (WinningSide.DRAW,)
-        won = user_id in winners and not is_draw
 
-        rating_delta = 0
-        if not is_draw:
-            rating_delta = WIN_RATING.get(side, 0) if won else LOSS_RATING
-        xp_delta = XP_PARTICIPATION
-        if won:
-            xp_delta += XP_WIN
-        xp_delta += events.kills.get(user_id, 0) * XP_KILL
-        xp_delta += events.saves.get(user_id, 0) * XP_SAVE
-        xp_delta += events.correct_votes.get(user_id, 0) * XP_CORRECT_VOTE
+class RatingService:
+    """Применение результатов игры к глобальной и/или локальной статистике.
 
-        user.games_played += 1
-        if won:
-            user.wins += 1
-        elif not is_draw:
-            user.losses += 1
+    apply_global(...) меняет ТОЛЬКО User; apply_local(...) меняет ТОЛЬКО
+    GroupPlayer конкретной группы. Методы идентичны по формулам, но работают
+    с разными объектами — случайная перезапись невозможна по построению.
+    """
 
-        user.rating = max(0, user.rating + rating_delta)
-        user.xp = max(0, user.xp + xp_delta)
-        user.level = level_from_xp(user.xp)
-        user.kills += events.kills.get(user_id, 0)
-        user.saves += events.saves.get(user_id, 0)
-        user.correct_votes += events.correct_votes.get(user_id, 0)
+    def __init__(
+        self,
+        rules: RatingRules = DEFAULT_RULES,
+        progression: ProgressionService = ProgressionService(),
+    ) -> None:
+        self.rules = rules
+        self.progression = progression
 
-        applied.rating_delta[user_id] = rating_delta
-        applied.xp_delta[user_id] = xp_delta
+    def _apply_rows(
+        self,
+        rows_by_user_id: dict[int, object],
+        winners: set[int],
+        is_draw: bool,
+        events: StatEvents,
+        survived_ids: set[int],
+        scope: ScopeFlags,
+    ) -> AppliedStats:
+        """Общий алгоритм над строками с полями статистики (User | GroupPlayer)."""
+        applied = AppliedStats()
+        for user_id, row in rows_by_user_id.items():
+            if row is None:
+                continue
+            won = user_id in winners and not is_draw
+            survived = user_id in survived_ids
+            contrib_rating, contrib_xp = contribution(self.rules, user_id, events, survived)
 
-    return applied
+            rating_delta = 0
+            xp_delta = 0
+            if is_draw:
+                pass  # антифарм: ничья ничего не начисляет
+            else:
+                if scope.rating:
+                    rating_delta = (self.rules.rating_win if won else self.rules.rating_loss) + contrib_rating
+                if scope.xp:
+                    xp_delta = (
+                        self.rules.xp_participation
+                        + (self.rules.xp_win if won else 0)
+                        + contrib_xp
+                    )
+
+            row.games_played += 1
+            if not is_draw:
+                if won:
+                    row.wins += 1
+                else:
+                    row.losses += 1
+            if scope.rating:
+                row.rating = max(0, row.rating + rating_delta)
+            if scope.xp:
+                row.xp = max(0, row.xp + xp_delta)
+                row.level = self.progression.level_for_xp(row.xp)
+
+            # Счётчики личного вклада (идентичны в обоих скоупах)
+            row.kills += events.kills.get(user_id, 0)
+            row.saves += events.saves.get(user_id, 0)
+            row.investigations += events.investigations.get(user_id, 0)
+            row.correct_votes += events.correct_votes.get(user_id, 0)
+
+            applied.rating_delta[user_id] = rating_delta
+            applied.xp_delta[user_id] = xp_delta
+        return applied
+
+    # ------------------------------------------------------------- скоупы
+
+    def apply_global(
+        self,
+        users_by_id: dict[int, object],
+        winners: set[int],
+        is_draw: bool,
+        events: StatEvents,
+        survived_ids: set[int],
+        flags: ScopeFlags,
+    ) -> AppliedStats:
+        """Глобальная статистика: ТОЛЬКО объекты User."""
+        return self._apply_rows(users_by_id, winners, is_draw, events, survived_ids, flags)
+
+    def apply_local(
+        self,
+        group_players_by_user_id: dict[int, object],
+        winners: set[int],
+        is_draw: bool,
+        events: StatEvents,
+        survived_ids: set[int],
+        flags: ScopeFlags,
+    ) -> AppliedStats:
+        """Локальная статистика: ТОЛЬКО GroupPlayer конкретной группы."""
+        return self._apply_rows(
+            group_players_by_user_id, winners, is_draw, events, survived_ids, flags
+        )

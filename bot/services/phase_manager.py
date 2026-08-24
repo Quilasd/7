@@ -28,7 +28,7 @@ from bot.roles import ActionType, Team, get_role, team_of
 from bot.services import game_view
 from bot.services.night_resolver import resolve_night
 from bot.services.notifier import Notifier
-from bot.services.rating import AppliedStats, StatEvents, apply_game_results
+from bot.services.rating import AppliedStats, RatingService, ScopeFlags, StatEvents
 from bot.services.role_manager import WinResult, evaluate_win
 from bot.services.timer_manager import TimerManager
 from bot.services.vote_manager import VoteManager
@@ -58,11 +58,16 @@ class PhaseManager:
         notifier: Notifier,
         timers: TimerManager,
         locks: GameLocks | None = None,
+        rating: RatingService | None = None,
+        app_settings=None,
     ) -> None:
         self.session_factory = session_factory
         self.notifier = notifier
         self.timers = timers
         self.locks = locks or GameLocks()
+        self.rating = rating or RatingService()
+        # app_settings: объект с флагами DEBUG_AFFECTS_* (bot.config.Settings)
+        self.app_settings = app_settings
 
     # ------------------------------------------------------------------ utils
 
@@ -378,56 +383,111 @@ class PhaseManager:
         await session.commit()
         self.timers.cancel(game.id)
 
-        # --- Статистика и рейтинг ------------------------------------------
-        # Тестовые игры (DEBUG MODE) статистику не трогают.
+        # --- Статистика и рейтинг (глобально и локально — раздельно) --------
         test_mode = bool(game.get_setting("test_mode"))
-        if test_mode:
-            logger.info("Игра %s: тестовый режим — статистика и рейтинг не обновляются", game.id)
-            applied = AppliedStats()
-        else:
-            events = StatEvents()
-            for event in game.events or []:
-                if event.get("type") == "death" and event.get("cause") in ("mafia", "maniac"):
-                    for killer_id in event.get("killers", []):
-                        events.kills[killer_id] = events.kills.get(killer_id, 0) + 1
-                elif event.get("type") == "save":
-                    healer = event.get("user_id")
-                    events.saves[healer] = events.saves.get(healer, 0) + 1
-                elif event.get("type") == "lynch":
-                    victim = next((p for p in players if p.user_id == event.get("user_id")), None)
-                    if victim is not None and team_of(victim.role) == Team.MAFIA:
-                        for voter_id in event.get("voters", []):
-                            voter = next((p for p in players if p.user_id == voter_id), None)
-                            if voter is not None and team_of(voter.role) == Team.CITY:
-                                events.correct_votes[voter_id] = events.correct_votes.get(voter_id, 0) + 1
+        side = WinningSide(game.winner)
+        is_draw = side == WinningSide.DRAW
 
+        # Настройки группы (если игра привязана к группе) задают флаги скоупов
+        group_settings = None
+        if game.group_id:
+            from bot.database.repositories.groups import GroupSettingsRepository
+
+            group_settings = await GroupSettingsRepository(session).get_for(game.group_id)
+
+        def flag(name: str) -> bool:
+            return bool(getattr(group_settings, name, True)) if group_settings else True
+
+        # Личный вклад за игру (для обоих скоупов один и тот же)
+        events = StatEvents()
+        for event in game.events or []:
+            if event.get("type") == "death" and event.get("cause") in ("mafia", "maniac"):
+                for killer_id in event.get("killers", []):
+                    events.kills[killer_id] = events.kills.get(killer_id, 0) + 1
+            elif event.get("type") == "save":
+                healer = event.get("user_id")
+                events.saves[healer] = events.saves.get(healer, 0) + 1
+            elif event.get("type") == "lynch":
+                victim = next((p for p in players if p.user_id == event.get("user_id")), None)
+                if victim is not None and team_of(victim.role) == Team.MAFIA:
+                    for voter_id in event.get("voters", []):
+                        voter = next((p for p in players if p.user_id == voter_id), None)
+                        if voter is not None and team_of(voter.role) == Team.CITY:
+                            events.correct_votes[voter_id] = events.correct_votes.get(voter_id, 0) + 1
+        # Расследования: поданные проверки комиссара
+        check_actions = await GameActionRepository(session).actions_of_type(game.id, "check")
+        for action in check_actions:
+            events.investigations[action.actor_id] = events.investigations.get(action.actor_id, 0) + 1
+        survived_ids = {p.user_id for p in players if p.is_alive}
+
+        global_flags = ScopeFlags(
+            rating=flag("rating_enabled") and flag("global_rating_enabled"),
+            xp=flag("xp_enabled") and flag("global_xp_enabled"),
+        )
+        local_flags = ScopeFlags(
+            rating=flag("rating_enabled") and flag("local_rating_enabled"),
+            xp=flag("xp_enabled") and flag("local_xp_enabled"),
+        )
+        debug_global = bool(self.app_settings.debug_affects_global_stats) if self.app_settings else False
+        debug_local = bool(self.app_settings.debug_affects_local_stats) if self.app_settings else False
+        apply_global = (not test_mode) or debug_global
+        apply_local = bool(game.group_id) and ((not test_mode) or debug_local)
+
+        applied_global = AppliedStats()
+        applied_local = AppliedStats()
+        if apply_global:
             users_repo = UserRepository(session)
             users_by_id: dict[int, object] = {}
             for gp in players:
                 user = await users_repo.get_by_id(gp.user_id)
                 if user:
                     users_by_id[gp.user_id] = user
-            side = WinningSide(game.winner)
-            applied = apply_game_results(users_by_id, winner_ids, side, events)
-            await session.commit()
+            applied_global = self.rating.apply_global(
+                users_by_id, winner_ids, is_draw, events, survived_ids, global_flags
+            )
+        if apply_local:
+            from bot.database.repositories.groups import GroupPlayerRepository
+
+            gp_repo = GroupPlayerRepository(session)
+            local_rows: dict[int, object] = {}
+            for gp in players:
+                local_rows[gp.user_id] = await gp_repo.ensure(game.group_id, gp.user_id)
+            applied_local = self.rating.apply_local(
+                local_rows, winner_ids, is_draw, events, survived_ids, local_flags
+            )
+        if test_mode and not (apply_global or apply_local):
+            logger.info("Игра %s: тестовый режим — статистика не обновляется", game.id)
+        await session.commit()
 
         # --- Финальные сообщения (одно на игрока, без лишнего спама) --------
         overview = game_view.game_over_text(game, title, players, winner_ids, reason or game.end_reason)
         for gp in players:
             if gp.status == PlayerStatus.SPECTATOR.value:
                 continue
-            if test_mode:
+            if test_mode and not (apply_global or apply_local):
                 personal = "🧪 Тестовая игра — статистика и рейтинг не изменены."
+            elif is_draw:
+                personal = "🤝 Ничья — рейтинг и опыт не изменены."
             else:
-                side = WinningSide(game.winner)
-                personal = game_view.personal_result_text(
-                    won=gp.user_id in winner_ids,
-                    is_draw=side == WinningSide.DRAW,
-                    rating_delta=applied.rating_delta.get(gp.user_id, 0),
-                    xp_delta=applied.xp_delta.get(gp.user_id, 0),
-                )
+                parts = []
+                if apply_global:
+                    parts.append(
+                        f"🌐 Рейтинг: {applied_global.rating_delta.get(gp.user_id, 0):+d}, "
+                        f"опыт: {applied_global.xp_delta.get(gp.user_id, 0):+d}"
+                    )
+                if apply_local:
+                    parts.append(
+                        f"🏠 Группа: рейтинг {applied_local.rating_delta.get(gp.user_id, 0):+d}, "
+                        f"опыт {applied_local.xp_delta.get(gp.user_id, 0):+d}"
+                    )
+                won = gp.user_id in winner_ids
+                head = "🎉 Ты в числе победителей!" if won else "😔 Поражение."
+                personal = head + "\n" + "\n".join(parts)
             await self._send(gp.user.telegram_id, f"{overview}\n\n———\n{personal}")
-        logger.info("Игра %s завершена: победитель=%s%s", game.id, game.winner, " (тест)" if test_mode else "")
+        logger.info(
+            "Игра %s завершена: победитель=%s%s (global=%s, local=%s)",
+            game.id, game.winner, " (тест)" if test_mode else "", apply_global, apply_local,
+        )
 
     async def force_end(self, game_id: int, reason: str) -> bool:
         """Принудительное завершение (админ)."""

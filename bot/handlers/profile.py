@@ -20,26 +20,61 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
-def profile_text(user) -> str:
+def profile_text(user, header: bool = True, progression=None) -> str:
+    """Глобальный блок профиля (статистика User, не зависит от групп)."""
+    from bot.services.progression import DEFAULT_PROGRESSION
+
+    progression = progression or DEFAULT_PROGRESSION
     total = user.wins + user.losses
     winrate = (user.wins / total * 100) if total else 0.0
+    _, in_level, need = progression.xp_progress_in_level(user.xp)
+    lines = [
+        "🌐 <b>ГЛОБАЛЬНО</b>",
+        "",
+        f"⭐ Рейтинг: <b>{user.rating}</b>",
+        f"🎖 Уровень: <b>{user.level}</b>",
+        f"✨ XP: <b>{user.xp}</b> (до следующего уровня {in_level}/{need})",
+        f"🏆 Побед: <b>{user.wins}</b>",
+        f"💀 Поражений: <b>{user.losses}</b>",
+        f"🎮 Игр: <b>{user.games_played}</b>",
+        f"📈 Winrate: <b>{winrate:.0f}%</b>",
+        "",
+        f"☠️ Убийств: <b>{user.kills}</b>",
+        f"❤️ Спасений: <b>{user.saves}</b>",
+        f"🕵️ Расследований: <b>{user.investigations}</b>",
+        f"🗳 Правильных голосований: <b>{user.correct_votes}</b>",
+    ]
+    if header:
+        head = [
+            f"👤 <b>{esc(display_name(user))}</b>",
+            f"ID: <code>{user.telegram_id}</code>",
+            "",
+        ]
+        lines = head + lines
+    return "\n".join(lines)
+
+
+def profile_group_block(group, group_player, progression=None) -> str:
+    """Локальный блок: статистика игрока В КОНКРЕТНОЙ группе (GroupPlayer)."""
+    from bot.services.progression import DEFAULT_PROGRESSION
+
+    progression = progression or DEFAULT_PROGRESSION
+    gp = group_player
+    total = gp.wins + gp.losses
+    winrate = (gp.wins / total * 100) if total else 0.0
+    _, in_level, need = progression.xp_progress_in_level(gp.xp)
     return "\n".join([
-        "👤 <b>ПРОФИЛЬ</b>",
+        f"🏠 <b>ЭТА ГРУППА</b>\n<i>{esc(group.title or '')}</i>\n",
+        f"⭐ Рейтинг: <b>{gp.rating}</b>",
+        f"🎖 Уровень: <b>{gp.level}</b>",
+        f"✨ XP: <b>{gp.xp}</b> (до следующего уровня {in_level}/{need})",
+        f"🏆 Побед: <b>{gp.wins}</b>",
+        f"💀 Поражений: <b>{gp.losses}</b>",
+        f"🎮 Игр: <b>{gp.games_played}</b>",
+        f"📈 Winrate: <b>{winrate:.0f}%</b>",
         "",
-        f"Имя: <b>{esc(display_name(user))}</b>",
-        f"ID: <code>{user.telegram_id}</code>",
-        "",
-        f"🎮 Игр сыграно: <b>{user.games_played}</b>",
-        f"✅ Победы: <b>{user.wins}</b>",
-        f"❌ Поражения: <b>{user.losses}</b>",
-        f"📈 Процент побед: <b>{winrate:.0f}%</b>",
-        "",
-        f"🔪 Убийства: <b>{user.kills}</b>",
-        f"❤️ Успешные спасения: <b>{user.saves}</b>",
-        f"🎯 Правильные голосования: <b>{user.correct_votes}</b>",
-        "",
-        f"🏆 Рейтинг: <b>{user.rating}</b>",
-        f"⭐️ Уровень: <b>{user.level}</b> (опыт {user.xp})",
+        f"☠️ Убийств: <b>{gp.kills}</b> · ❤️ Спасений: <b>{gp.saves}</b>",
+        f"🕵️ Расследований: <b>{gp.investigations}</b> · 🗳 Верный голос: <b>{gp.correct_votes}</b>",
     ])
 
 
@@ -60,9 +95,18 @@ async def cmd_profile(message: Message, db_user) -> None:
 
 
 @router.callback_query(MenuCB.filter(F.action == "profile"))
-async def cb_profile(callback: CallbackQuery, db_user) -> None:
+async def cb_profile(callback: CallbackQuery, session, db_user, group) -> None:
+    from bot.database.repositories.groups import GroupPlayerRepository
+
     await callback.answer()
-    await edit_or_answer(callback, profile_text(db_user), profile_kb())
+    text = profile_text(db_user)
+    if group is not None:
+        gp = await GroupPlayerRepository(session).get_membership(group.id, db_user.id)
+        if gp:
+            text += "\n\n———\n\n" + profile_group_block(group, gp)
+        else:
+            text += "\n\n🏠 Статистики в этой группе пока нет."
+    await edit_or_answer(callback, text, profile_kb())
 
 
 @router.callback_query(MenuCB.filter(F.action == "settings"))

@@ -210,8 +210,9 @@ class TestSupervisor:
         async with services.session_factory() as s:
             fresh_admin = await UserRepository(s).get_by_id(admin.id)
         assert fresh_admin.games_played == 0
-        assert fresh_admin.rating == 1000
+        assert fresh_admin.rating == 0  # статистика не тронута (старт 0)
         assert fresh_admin.wins == 0
+        assert fresh_admin.xp == 0
 
 
 class TestControls:

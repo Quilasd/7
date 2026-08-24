@@ -92,3 +92,18 @@ class TestCB(CallbackData, prefix="test"):
 
     action: str  # create | status | skip | actnow | auto | finish
     value: str = ""
+
+
+class RatingCB(CallbackData, prefix="rate"):
+    """Рейтинги: скоуп + метрика + страница."""
+
+    scope: str   # global | local
+    metric: str  # rating | wins | level
+    page: int = 0
+
+
+class SettingCB(CallbackData, prefix="gset"):
+    """Настройки группы."""
+
+    action: str  # menu | players | timers | roles | voting | progression | extra | set
+    value: str = ""

@@ -18,9 +18,20 @@ from aiogram.types import ErrorEvent, Update
 from bot.config import get_settings
 from bot.database.database import create_engine, create_session_factory, dispose_engine, init_db
 from bot.handlers import get_root_router
-from bot.middlewares import DbSessionMiddleware, ServicesMiddleware, ThrottlingMiddleware, UserMiddleware
+from bot.middlewares import (
+    DbSessionMiddleware,
+    GroupContextMiddleware,
+    MaintenanceMiddleware,
+    ServicesMiddleware,
+    ThrottlingMiddleware,
+    UserMiddleware,
+)
 from bot.services.app_config import AppConfigService
+from bot.services.audit import AuditService
 from bot.services.game_manager import GameManager
+from bot.services.groups import GroupService
+from bot.services.permissions import PermissionService
+from bot.services.rating import RatingService
 from bot.services.notifier import TelegramNotifier
 from bot.services.phase_manager import GameLocks, PhaseManager
 from bot.services.rooms import RoomService
@@ -34,7 +45,8 @@ logger = logging.getLogger(__name__)
 class Services:
     """DI-контейнер: доступен хендлерам через data['services']."""
 
-    def __init__(self, session_factory, notifier, timers, phases, games, rooms, app_config, test_games, settings):
+    def __init__(self, session_factory, notifier, timers, phases, games, rooms, app_config,
+                 test_games, settings, permissions, groups, audit, rating, maintenance):
         self.session_factory = session_factory
         self.notifier = notifier
         self.timers = timers
@@ -44,6 +56,11 @@ class Services:
         self.app_config = app_config
         self.test_games = test_games
         self.settings = settings
+        self.permissions = permissions
+        self.groups = groups
+        self.audit = audit
+        self.rating = rating
+        self.maintenance = maintenance
 
 
 def build_services(bot: Bot, settings) -> tuple[Services, TimerManager]:
@@ -53,7 +70,10 @@ def build_services(bot: Bot, settings) -> tuple[Services, TimerManager]:
     notifier = TelegramNotifier(bot, session_factory)
     timers = TimerManager()
     locks = GameLocks()
-    phases = PhaseManager(session_factory, notifier, timers, locks)
+    rating = RatingService()
+    phases = PhaseManager(
+        session_factory, notifier, timers, locks, rating=rating, app_settings=settings
+    )
     games = GameManager(session_factory, notifier, phases, locks)
     app_config = AppConfigService(session_factory, settings)
     rooms = RoomService(
@@ -63,9 +83,14 @@ def build_services(bot: Bot, settings) -> tuple[Services, TimerManager]:
         max_players_limit=settings.max_players_limit,
         min_players_limit=settings.min_players_limit,
     )
-    test_games = TestGameManager(session_factory, games, phases, notifier)
+    permissions = PermissionService(settings)
+    groups_service = GroupService(session_factory, permissions)
+    audit = AuditService(session_factory)
+    test_games = TestGameManager(session_factory, games, phases, notifier, groups=groups_service)
+    maintenance = MaintenanceMiddleware(session_factory)
     services = Services(
-        session_factory, notifier, timers, phases, games, rooms, app_config, test_games, settings
+        session_factory, notifier, timers, phases, games, rooms, app_config, test_games,
+        settings, permissions, groups_service, audit, rating, maintenance,
     )
     services.engine = engine  # для корректного dispose при остановке
     return services, timers
@@ -87,13 +112,17 @@ async def create_app() -> tuple[Bot, Dispatcher, Services, TimerManager]:
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(get_root_router())
 
-    # Порядок: сессия -> сервисы -> троттлинг -> пользователь
+    # Порядок: сессия -> сервисы -> троттлинг -> пользователь -> maintenance -> группа
     dp.update.outer_middleware(DbSessionMiddleware(services.session_factory))
     dp.update.outer_middleware(ServicesMiddleware(services))
     dp.message.middleware(ThrottlingMiddleware())
     dp.callback_query.middleware(ThrottlingMiddleware())
     dp.message.middleware(UserMiddleware())
     dp.callback_query.middleware(UserMiddleware())
+    dp.message.middleware(services.maintenance)
+    dp.callback_query.middleware(services.maintenance)
+    dp.message.middleware(GroupContextMiddleware())
+    dp.callback_query.middleware(GroupContextMiddleware())
 
     @dp.errors()
     async def on_error(event: ErrorEvent, exception: Exception):

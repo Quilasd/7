@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     # ADMIN_IDS приходит строкой «111,222»: pydantic-settings ожидает JSON
     # для list-полей, поэтому храним строку, а список отдаём свойством.
     admin_ids: str = Field(default="", validation_alias="ADMIN_IDS")
+    # Глобальные Owner'ы (уровень 5 во всех чатах, см. PermissionService)
+    owner_ids: str = Field(default="", validation_alias="OWNER_IDS")
 
     # --- База данных --------------------------------------------------------
     # SQLite — для разработки; PostgreSQL подставляется одной строкой в .env:
@@ -48,6 +50,9 @@ class Settings(BaseSettings):
     # --- DEBUG MODE ---------------------------------------------------------
     # Включает /testgame (создание тестовых игр с ботами). Доступно только ADMIN_IDS.
     debug_mode: bool = Field(default=False, validation_alias="DEBUG_MODE")
+    # По умолчанию тестовые игры НЕ меняют настоящую статистику.
+    debug_affects_global_stats: bool = Field(default=False, validation_alias="DEBUG_AFFECTS_GLOBAL_STATS")
+    debug_affects_local_stats: bool = Field(default=False, validation_alias="DEBUG_AFFECTS_LOCAL_STATS")
 
     # --- Игровые значения по умолчанию (переопределяются настройками комнаты)
     default_night_seconds: int = Field(default=90, validation_alias="DEFAULT_NIGHT_SECONDS")
@@ -69,12 +74,22 @@ class Settings(BaseSettings):
 
     def admin_id_list(self) -> list[int]:
         """«123,456» -> [123, 456]."""
-        if not self.admin_ids:
+        return self._parse_ids(self.admin_ids)
+
+    def owner_id_list(self) -> list[int]:
+        return self._parse_ids(self.owner_ids)
+
+    @staticmethod
+    def _parse_ids(raw: str) -> list[int]:
+        if not raw:
             return []
-        return [int(p.strip()) for p in self.admin_ids.replace(";", ",").split(",") if p.strip()]
+        return [int(p.strip()) for p in raw.replace(";", ",").split(",") if p.strip()]
 
     def is_admin(self, telegram_id: int) -> bool:
         return telegram_id in self.admin_id_list()
+
+    def is_owner(self, telegram_id: int) -> bool:
+        return telegram_id in self.owner_id_list()
 
     def sqlite_mode(self) -> bool:
         return self.database_url.startswith("sqlite")

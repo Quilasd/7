@@ -88,6 +88,7 @@ class GameManager:
             countdown = int(settings.get("start_countdown_seconds", 5))
             game = Game(
                 room_id=room.id,
+                group_id=room.group_id,
                 status=GameStatus.STARTING.value,
                 max_players=room.max_players,
                 day_number=0,
