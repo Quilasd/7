@@ -61,6 +61,20 @@ async def cmd_start(message: Message, db_user) -> None:
         WELCOME.format(name=esc(display_name(db_user))),
         reply_markup=main_menu_kb(),
     )
+    # Telegram позволяет BotCommandScopeChat только после начала диалога:
+    # если админ из .env написал боту впервые — доставляем его расширенное
+    # меню команд именно сейчас (на старте бота это могло быть невозможно).
+    from bot.config import get_settings
+    from bot.utils.commands_menu import refresh_user_commands
+
+    settings = get_settings()
+    if settings.is_admin(message.from_user.id) or settings.is_owner(message.from_user.id):
+        await refresh_user_commands(
+            message.bot,
+            message.from_user.id,
+            is_admin=settings.is_admin(message.from_user.id),
+            is_owner=settings.is_owner(message.from_user.id),
+        )
 
 
 @router.message(Command("help"))

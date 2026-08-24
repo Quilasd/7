@@ -37,6 +37,7 @@ from bot.services.phase_manager import GameLocks, PhaseManager
 from bot.services.rooms import RoomService
 from bot.services.test_game import TestGameManager
 from bot.services.timer_manager import TimerManager
+from bot.utils.commands_menu import setup_bot_commands
 from bot.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -141,6 +142,10 @@ async def create_app() -> tuple[Bot, Dispatcher, Services, TimerManager]:
     async def on_startup() -> None:
         recovered = await services.phases.recover()
         logger.info("Бот запущен. Восстановлено игр: %s", recovered)
+        # Автоподсказки команд «/»: базовый список всем, расширенный —
+        # глобальной администрации (OWNER_IDS/ADMIN_IDS). UX-only: права
+        # проверяются на сервере при каждом вызове команды.
+        await setup_bot_commands(bot, settings)
 
     @dp.shutdown()
     async def on_shutdown() -> None:
