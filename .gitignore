@@ -1,0 +1,27 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# --- Секреты и данные ---
+.env
+data/
+*.db
+*.db-journal
+
+# --- Логи ---
+logs/
+*.log
+
+# --- Docker ---
+# (Dockerfile остаётся, игнорируем только локальные артефакты)
+
+# --- IDE ---
+.idea/
+.vscode/
+.DS_Store

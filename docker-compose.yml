@@ -1,0 +1,35 @@
+services:
+  bot:
+    build: .
+    container_name: mafia-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Внутри контейнера БД живёт на volume
+      DATABASE_URL: sqlite+aiosqlite:////app/data/mafia.db
+      AUTO_CREATE_TABLES: "true"
+    volumes:
+      - mafia_data:/app/data
+      - mafia_logs:/app/logs
+
+  # Продакшен с PostgreSQL: раскомментируйте блоки ниже,
+  # замените DATABASE_URL на postgresql+asyncpg://mafia:mafia@db:5432/mafia
+  # и добавьте asyncpg в requirements.txt.
+  #
+  # db:
+  #   image: postgres:16-alpine
+  #   environment:
+  #     POSTGRES_USER: mafia
+  #     POSTGRES_PASSWORD: mafia
+  #     POSTGRES_DB: mafia
+  #   volumes:
+  #     - pg_data:/var/lib/postgresql/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U mafia"]
+  #     interval: 5s
+  #     timeout: 5s
+  #     retries: 10
+
+volumes:
+  mafia_data:
+  mafia_logs:
