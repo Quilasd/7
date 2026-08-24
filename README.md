@@ -102,6 +102,48 @@ python -m bot.main
 python -m pytest tests/ -v
 ```
 
+## Обновление бота без поломок
+
+Порядок, при котором невозможно потерять данные (SQLite-путь; для PostgreSQL
+те же шаги, но бэкап через `pg_dump`):
+
+```bash
+# 1) Остановить бота (Ctrl+C / systemctl stop mafia / docker compose down)
+# 2) БЭКАП — самое важное (.env не хранится в git!)
+cp .env .env.backup.$(date +%F)
+cp -r data data.backup.$(date +%F)
+
+# 3) Забрать обновление
+git fetch origin
+git pull origin main            # или: git checkout <ветка> && git pull
+
+# 4) Зависимости (в том же venv, где бот работает)
+pip install -r requirements.txt
+
+# 5) Сверить .env с .env.example — появляются новые переменные
+#    (OWNER_IDS — глобальный владелец; DEBUG_AFFECTS_*_STATS — опциональны)
+
+# 6) Миграции (идемпотентны: на частично обновлённой БД ничего не сломают)
+alembic upgrade head
+
+# 7) Запустить и проверить логи
+python -m bot.main        # или systemctl start mafia / docker compose up -d
+```
+
+Проверка после обновления: `/debug_help` (владелец видит справочник и
+диагностику OWNER_IDS), `/top`, профиль, тестовая `/testgame`.
+
+**Откат**, если что-то пошло не так:
+
+```bash
+git reset --hard <предыдущий коммит>     # git log --oneline -5 подскажет
+alembic downgrade -1                     # миграция 0003 откатывается
+mv data.backup.ГГГГ-ММ-ДД data           # если нужен и бэкап БД
+```
+
+Важно: не запускайте два экземпляра бота на одном токене/БД — перед
+обновлением старый процесс нужно остановить.
+
 ## Структура проекта
 
 ```
