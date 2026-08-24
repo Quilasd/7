@@ -1,0 +1,13 @@
+# Telegram-бот «Мафия Онлайн»
+# Python 3.12+ (работает и на 3.11+)
+
+aiogram>=3.15,<4
+SQLAlchemy>=2.0.36,<3
+aiosqlite>=0.20
+pydantic>=2.8,<3
+pydantic-settings>=2.4,<3
+python-dotenv>=1.0
+alembic>=1.13
+
+# Для продакшена на PostgreSQL раскомментируйте:
+# asyncpg>=0.29
