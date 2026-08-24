@@ -898,3 +898,106 @@ async def cmd_maintenance(message: Message, session, services, group) -> None:
     if services.maintenance is not None:
         services.maintenance.invalidate()
     await message.answer(f"🛠 Режим обслуживания: {'ВКЛ' if enabled else 'ВЫКЛ'}")
+
+
+# ------------------------------------------------------ справочник Owner
+
+_DEBUG_HELP_TEXT = """👑 <b>СПРАВОЧНИК ВЛАДЕЛЬЦА</b> (уровень 5)
+
+<b>ДИАГНОСТИКА ПРАВ</b>
+{diagnostics}
+
+<b>УРОВНИ АДМИНИСТРАЦИИ</b>
+0 👤 Player — обычный игрок
+1 🛟 Helper — просмотр, warn
+2 🔨 Moderator — + mute / kick / ban
+3 ⚙️ Admin — + комнаты, старт/стоп игры, DEBUG
+4 🎖 Senior Admin — + настройки, штат, broadcast
+5 👑 Owner — всё (OWNER_IDS в .env)
+
+<b>👤 ИГРОК</b> (все, везде)
+/play — меню · /profile — профиль 🌐+🏠 · /top — рейтинги
+/rules — правила · /help — помощь · /cancel — отмена
+
+<code>Профиль/рейтинг в группе показывают и локальную 🏠 статистику.</code>
+
+<b>📈 ПРОФИЛИ И СТАТИСТИКА</b>
+/player &lt;ID|@username|reply&gt; — {p1} VIEW_PROFILE
+/player_stats — аналог · /players — VIEW_PLAYERS
+/stats — своя статистика · /group_stats · /global_stats
+/top /top_rating /top_wins /top_levels — топы 🌐/🏠 с пагинацией
+
+<b>🔨 МОДЕРАЦИЯ</b> (в группе; цель — ID/@username/reply)
+/warn /unwarn /warnings — WARN_PLAYER
+/mute [мин] /unmute — MUTE_PLAYER (Telegram-мут, 1–1440 мин)
+/kick — KICK_PLAYER · /ban /unban — BAN_PLAYER
+
+<b>🎮 ИГРА И КОМНАТЫ</b>
+/game — активная игра в группе · /games — список
+/game_info ID · /game_players · /game_phase
+/game_start — MANAGE_ROOMS · /game_stop /game_cancel — STOP_GAME
+/game_kill /game_revive — STOP_GAME
+/rooms · /room ID · /room_close · /room_kick · /room_force_start
+/createroom — комната с правилами группы — MANAGE_ROOMS
+
+<b>👥 ШТАТ</b> (MANAGE_STAFF; защита: не ≥ своего уровня)
+/staff · /staff_add &lt;цель&gt; 1-4 · /staff_remove
+/staff_promote · /staff_demote · /staff_info
+
+<b>⚙️ НАСТРОЙКИ ГРУППЫ</b> (MANAGE_SETTINGS, только в группе)
+/settings — inline-меню (Игроки/Таймеры/Роли/Голосование/Рейтинг/XP/Доп.)
+/set_min_players /set_max_players · /set_night_time /set_day_time
+/set_vote_time · /set_roles mafia N|maniac on|off
+
+<b>📣 МАССОВЫЕ И СИСТЕМА</b>
+/broadcast /announce — BROADCAST (рассылка)
+/botstats — VIEW_STATS · /logs — BROADCAST
+/reload — OWNER_IDS+ADMIN_IDS · /maintenance — MANAGE_GLOBAL_SETTINGS
+
+<b>🧪 DEBUG MODE</b> (USE_DEBUG: Admin+ при debug_enabled группы; Owner — всегда)
+/testgame [4-8|fast] — тест-игра с ботами
+/testgame fast — таймеры по 5 сек
+/debug — статус · /debug_game ID · /debug_state
+/debug_phase · /debug_finish_phase
+
+<code>Статистика тест-игр меняется только при
+DEBUG_AFFECTS_GLOBAL/LOCAL_STATS=true в .env (по умолчанию выключены).</code>
+
+<b>👑 ТОЛЬКО ВЛАДЕЛЬЦУ</b>
+/debug_help — этот справочник
+/admin — админ-панель (OWNER_IDS + ADMIN_IDS)"""
+
+
+@router.message(Command("debug_help"))
+async def cmd_debug_help(message: Message, session, services, group) -> None:
+    """Справочник всех команд + диагностика прав. Доступно только уровню 5."""
+    access = await _access(session, services, message.from_user.id, group)
+    if access.level < AdminLevel.OWNER:
+        await message.answer(
+            "👑 Команда доступна только глобальному Owner (OWNER_IDS в .env).\n"
+            f"Твой текущий уровень: {access.title}"
+        )
+        return
+
+    from bot.config import get_settings
+
+    env_settings = get_settings()
+    tg_id = message.from_user.id
+    owners = env_settings.owner_id_list()
+    admins = env_settings.admin_id_list()
+    diagnostics = "\n".join([
+        f"👤 Твой Telegram ID: <code>{tg_id}</code>",
+        f"👑 OWNER_IDS распознан: {len(owners)} шт. — "
+        + ("<b>ты владелец ✅</b>" if tg_id in owners else "тебя там НЕТ ❌"),
+        f"⚙️ ADMIN_IDS распознан: {len(admins)} шт. — "
+        + ("ты в списке ✅" if tg_id in admins else "тебя там нет"),
+        f"📍 Контекст: {'группа' if group is not None else 'личный чат'} · "
+        f"уровень: {access.title}"
+        + ("" if tg_id in owners else "\n\n⚠️ Если ID указан в .env, но не распознаётся — "
+           "проверь, что он в OWNER_IDS без @ и пробелов, и перезапусти бота "
+           "(env читается только при старте)."),
+    ])
+    text = _DEBUG_HELP_TEXT.format(diagnostics=diagnostics, p1="свой — всегда, чужой —")
+    if len(text) > 4096:
+        text = text[:4090] + "\n…"
+    await message.answer(text)

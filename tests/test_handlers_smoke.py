@@ -305,6 +305,43 @@ class TestStaffCommands:
 
 
 class TestSystemCommands:
+    async def test_debug_help_owner_only(self, services, session, monkeypatch):
+        owner = await make_user(session, "Owner")
+        senior = await make_user(session, "Senior")
+        services.settings._owners = [owner.telegram_id]
+        services.settings._admins = [senior.telegram_id]
+        # get_settings импортируется внутри хендлера — патчим модуль-источник
+        monkeypatch.setattr("bot.config.get_settings", lambda: services.settings)
+
+        # владелец получает справочник с диагностикой
+        msg = FakeMessage(FakeTgUser(owner.telegram_id), "/debug_help")
+        await ga.cmd_debug_help(msg, session=session, services=services, group=None)
+        assert any("СПРАВОЧНИК ВЛАДЕЛЬЦА" in t for t in msg.answers)
+        assert any("ты владелец ✅" in t for t in msg.answers)
+
+        # senior admin (4) — отказ, справочника нет
+        msg2 = FakeMessage(FakeTgUser(senior.telegram_id), "/debug_help")
+        await ga.cmd_debug_help(msg2, session=session, services=services, group=None)
+        assert any("только глобальному Owner" in t for t in msg2.answers)
+        assert not any("СПРАВОЧНИК ВЛАДЕЛЬЦА" in t for t in msg2.answers)
+
+    async def test_admin_panel_accepts_owner_without_admin_ids(self, monkeypatch):
+        """Владелец из OWNER_IDS должен попадать в /admin даже вне ADMIN_IDS."""
+        import bot.handlers.admin as admin_mod
+
+        class EnvStub:
+            def is_admin(self, telegram_id: int) -> bool:
+                return False  # ADMIN_IDS пуст — раньше владелец получал отказ
+
+            def is_owner(self, telegram_id: int) -> bool:
+                return telegram_id == 424242
+
+            debug_mode = True
+
+        monkeypatch.setattr(admin_mod, "get_settings", lambda: EnvStub())
+        assert admin_mod._is_admin(424242) is True   # владелец проходит
+        assert admin_mod._is_admin(111111) is False  # посторонний — нет
+
     async def test_botstats(self, services, session):
         boss = await make_user(session, "Boss")
         group = await services.groups.get_or_create(-601800, "A")

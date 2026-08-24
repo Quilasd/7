@@ -1,6 +1,7 @@
 """Админ-панель: статистика, игры, комнаты, баны, рассылка, логи, роли, параметры.
 
-Доступ только для ADMIN_IDS из .env (проверка на каждом действии).
+Доступ для OWNER_IDS и ADMIN_IDS из .env (проверка на каждом действии):
+владелец (OWNER_IDS) проходит всегда, администраторы (ADMIN_IDS) — как и раньше.
 """
 
 from __future__ import annotations
@@ -37,7 +38,10 @@ router = Router()
 
 
 def _is_admin(user_id: int) -> bool:
-    return get_settings().is_admin(user_id)
+    # Глобальный Owner (OWNER_IDS) имеет право на админ-панель всегда,
+    # даже если его ID не указан в ADMIN_IDS.
+    settings = get_settings()
+    return settings.is_admin(user_id) or settings.is_owner(user_id)
 
 
 @router.message(Command("admin"))
