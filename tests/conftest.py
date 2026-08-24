@@ -15,6 +15,7 @@ from bot.services.app_config import AppConfigService
 from bot.services.game_manager import GameManager
 from bot.services.phase_manager import GameLocks, PhaseManager
 from bot.services.rooms import RoomService
+from bot.services.test_game import TestGameManager
 from bot.services.timer_manager import NoopTimerManager
 from bot.services.notifier import FakeNotifier
 
@@ -26,6 +27,7 @@ class SettingsStub:
     start_countdown_seconds = 0
     min_players_limit = 4
     max_players_limit = 20
+    debug_mode = True
 
 
 @pytest.fixture()
@@ -70,6 +72,7 @@ async def services(session_factory, notifier):
     games = GameManager(session_factory, notifier, phases, locks)
     app_config = AppConfigService(session_factory, SettingsStub())
     rooms = RoomService(session_factory, notifier, app_config)
+    test_games = TestGameManager(session_factory, games, phases, notifier)
     container = type("Services", (), {})()
     container.session_factory = session_factory
     container.notifier = notifier
@@ -78,8 +81,10 @@ async def services(session_factory, notifier):
     container.games = games
     container.app_config = app_config
     container.rooms = rooms
+    container.test_games = test_games
     container.settings = SettingsStub()
     yield container
+    test_games.stop_all()
     timers.cancel_all()
 
 

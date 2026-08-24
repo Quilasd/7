@@ -28,7 +28,7 @@ from bot.roles import ActionType, Team, get_role, team_of
 from bot.services import game_view
 from bot.services.night_resolver import resolve_night
 from bot.services.notifier import Notifier
-from bot.services.rating import StatEvents, apply_game_results
+from bot.services.rating import AppliedStats, StatEvents, apply_game_results
 from bot.services.role_manager import WinResult, evaluate_win
 from bot.services.timer_manager import TimerManager
 from bot.services.vote_manager import VoteManager
@@ -379,45 +379,55 @@ class PhaseManager:
         self.timers.cancel(game.id)
 
         # --- Статистика и рейтинг ------------------------------------------
-        events = StatEvents()
-        for event in game.events or []:
-            if event.get("type") == "death" and event.get("cause") in ("mafia", "maniac"):
-                for killer_id in event.get("killers", []):
-                    events.kills[killer_id] = events.kills.get(killer_id, 0) + 1
-            elif event.get("type") == "save":
-                healer = event.get("user_id")
-                events.saves[healer] = events.saves.get(healer, 0) + 1
-            elif event.get("type") == "lynch":
-                victim = next((p for p in players if p.user_id == event.get("user_id")), None)
-                if victim is not None and team_of(victim.role) == Team.MAFIA:
-                    for voter_id in event.get("voters", []):
-                        voter = next((p for p in players if p.user_id == voter_id), None)
-                        if voter is not None and team_of(voter.role) == Team.CITY:
-                            events.correct_votes[voter_id] = events.correct_votes.get(voter_id, 0) + 1
+        # Тестовые игры (DEBUG MODE) статистику не трогают.
+        test_mode = bool(game.get_setting("test_mode"))
+        if test_mode:
+            logger.info("Игра %s: тестовый режим — статистика и рейтинг не обновляются", game.id)
+            applied = AppliedStats()
+        else:
+            events = StatEvents()
+            for event in game.events or []:
+                if event.get("type") == "death" and event.get("cause") in ("mafia", "maniac"):
+                    for killer_id in event.get("killers", []):
+                        events.kills[killer_id] = events.kills.get(killer_id, 0) + 1
+                elif event.get("type") == "save":
+                    healer = event.get("user_id")
+                    events.saves[healer] = events.saves.get(healer, 0) + 1
+                elif event.get("type") == "lynch":
+                    victim = next((p for p in players if p.user_id == event.get("user_id")), None)
+                    if victim is not None and team_of(victim.role) == Team.MAFIA:
+                        for voter_id in event.get("voters", []):
+                            voter = next((p for p in players if p.user_id == voter_id), None)
+                            if voter is not None and team_of(voter.role) == Team.CITY:
+                                events.correct_votes[voter_id] = events.correct_votes.get(voter_id, 0) + 1
 
-        users_repo = UserRepository(session)
-        users_by_id: dict[int, object] = {}
-        for gp in players:
-            user = await users_repo.get_by_id(gp.user_id)
-            if user:
-                users_by_id[gp.user_id] = user
-        side = WinningSide(game.winner)
-        applied = apply_game_results(users_by_id, winner_ids, side, events)
-        await session.commit()
+            users_repo = UserRepository(session)
+            users_by_id: dict[int, object] = {}
+            for gp in players:
+                user = await users_repo.get_by_id(gp.user_id)
+                if user:
+                    users_by_id[gp.user_id] = user
+            side = WinningSide(game.winner)
+            applied = apply_game_results(users_by_id, winner_ids, side, events)
+            await session.commit()
 
         # --- Финальные сообщения (одно на игрока, без лишнего спама) --------
         overview = game_view.game_over_text(game, title, players, winner_ids, reason or game.end_reason)
         for gp in players:
             if gp.status == PlayerStatus.SPECTATOR.value:
                 continue
-            personal = game_view.personal_result_text(
-                won=gp.user_id in winner_ids,
-                is_draw=side == WinningSide.DRAW,
-                rating_delta=applied.rating_delta.get(gp.user_id, 0),
-                xp_delta=applied.xp_delta.get(gp.user_id, 0),
-            )
+            if test_mode:
+                personal = "🧪 Тестовая игра — статистика и рейтинг не изменены."
+            else:
+                side = WinningSide(game.winner)
+                personal = game_view.personal_result_text(
+                    won=gp.user_id in winner_ids,
+                    is_draw=side == WinningSide.DRAW,
+                    rating_delta=applied.rating_delta.get(gp.user_id, 0),
+                    xp_delta=applied.xp_delta.get(gp.user_id, 0),
+                )
             await self._send(gp.user.telegram_id, f"{overview}\n\n———\n{personal}")
-        logger.info("Игра %s завершена: победитель=%s", game.id, game.winner)
+        logger.info("Игра %s завершена: победитель=%s%s", game.id, game.winner, " (тест)" if test_mode else "")
 
     async def force_end(self, game_id: int, reason: str) -> bool:
         """Принудительное завершение (админ)."""

@@ -85,3 +85,10 @@ class ProfileCB(CallbackData, prefix="prof"):
 
     action: str  # name | games | back
     value: str = ""
+
+
+class TestCB(CallbackData, prefix="test"):
+    """DEBUG MODE: управление тестовой игрой."""
+
+    action: str  # create | status | skip | actnow | auto | finish
+    value: str = ""

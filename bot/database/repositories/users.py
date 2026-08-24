@@ -47,13 +47,16 @@ class UserRepository(BaseRepository[User]):
 
     async def top_by_rating(self, limit: int = 10) -> list[User]:
         result = await self.session.execute(
-            select(User).where(User.is_banned.is_(False)).order_by(User.rating.desc(), User.wins.desc()).limit(limit)
+            select(User)
+            .where(User.is_banned.is_(False), User.is_test.is_(False))
+            .order_by(User.rating.desc(), User.wins.desc())
+            .limit(limit)
         )
         return list(result.scalars().all())
 
     async def count_all(self) -> int:
         result = await self.session.execute(
-            select(func.count()).select_from(User).where(User.is_banned.is_(False))
+            select(func.count()).select_from(User).where(User.is_banned.is_(False), User.is_test.is_(False))
         )
         return int(result.scalar_one())
 
@@ -61,7 +64,9 @@ class UserRepository(BaseRepository[User]):
         """telegram_id всех, кто может получать ЛС."""
         result = await self.session.execute(
             select(User.telegram_id).where(
-                User.is_banned.is_(False), User.can_receive_dm.is_(True)
+                User.is_banned.is_(False),
+                User.can_receive_dm.is_(True),
+                User.is_test.is_(False),  # тестовых ботов в рассылку не берём
             )
         )
         return [int(row[0]) for row in result.all()]

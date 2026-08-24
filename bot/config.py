@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
     log_file: str = Field(default="logs/bot.log", validation_alias="LOG_FILE")
 
+    # --- DEBUG MODE ---------------------------------------------------------
+    # Включает /testgame (создание тестовых игр с ботами). Доступно только ADMIN_IDS.
+    debug_mode: bool = Field(default=False, validation_alias="DEBUG_MODE")
+
     # --- Игровые значения по умолчанию (переопределяются настройками комнаты)
     default_night_seconds: int = Field(default=90, validation_alias="DEFAULT_NIGHT_SECONDS")
     default_day_seconds: int = Field(default=180, validation_alias="DEFAULT_DAY_SECONDS")

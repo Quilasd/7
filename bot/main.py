@@ -24,6 +24,7 @@ from bot.services.game_manager import GameManager
 from bot.services.notifier import TelegramNotifier
 from bot.services.phase_manager import GameLocks, PhaseManager
 from bot.services.rooms import RoomService
+from bot.services.test_game import TestGameManager
 from bot.services.timer_manager import TimerManager
 from bot.utils.logging import setup_logging
 
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 class Services:
     """DI-контейнер: доступен хендлерам через data['services']."""
 
-    def __init__(self, session_factory, notifier, timers, phases, games, rooms, app_config, settings):
+    def __init__(self, session_factory, notifier, timers, phases, games, rooms, app_config, test_games, settings):
         self.session_factory = session_factory
         self.notifier = notifier
         self.timers = timers
@@ -41,6 +42,7 @@ class Services:
         self.games = games
         self.rooms = rooms
         self.app_config = app_config
+        self.test_games = test_games
         self.settings = settings
 
 
@@ -61,7 +63,10 @@ def build_services(bot: Bot, settings) -> tuple[Services, TimerManager]:
         max_players_limit=settings.max_players_limit,
         min_players_limit=settings.min_players_limit,
     )
-    services = Services(session_factory, notifier, timers, phases, games, rooms, app_config, settings)
+    test_games = TestGameManager(session_factory, games, phases, notifier)
+    services = Services(
+        session_factory, notifier, timers, phases, games, rooms, app_config, test_games, settings
+    )
     services.engine = engine  # для корректного dispose при остановке
     return services, timers
 
@@ -110,6 +115,7 @@ async def create_app() -> tuple[Bot, Dispatcher, Services, TimerManager]:
 
     @dp.shutdown()
     async def on_shutdown() -> None:
+        services.test_games.stop_all()
         timers.cancel_all()
         await dispose_engine(services.engine)
         logger.info("Бот остановлен")

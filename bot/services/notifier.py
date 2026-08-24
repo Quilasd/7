@@ -38,6 +38,11 @@ class TelegramNotifier:
     async def send(
         self, user_id: int, text: str, keyboard: InlineKeyboardMarkup | None = None
     ) -> bool:
+        if user_id <= 0:
+            # Тестовые боты (DEBUG MODE) имеют отрицательные telegram_id —
+            # в Telegram им ничего не отправляем.
+            logger.debug("Пропуск отправки тестовому боту user_id=%s", user_id)
+            return False
         try:
             await self.bot.send_message(
                 chat_id=user_id,

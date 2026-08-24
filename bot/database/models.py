@@ -89,6 +89,7 @@ class User(Base):
 
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     can_receive_dm: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_test: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
