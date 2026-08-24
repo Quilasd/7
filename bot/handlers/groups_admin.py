@@ -630,8 +630,8 @@ def _settings_kb() -> InlineKeyboardMarkup:
 def _section_kb(section: str) -> InlineKeyboardMarkup:
     """Секции настроек: числовые кнопки ± и переключатели."""
     def num(label: str, key: str, step: int) -> list[InlineKeyboardButton]:
-        minus = f"{key}:minus" if step == 1 else f"{key}:minus{step}"
-        plus = f"{key}:plus" if step == 1 else f"{key}:plus{step}"
+        minus = f"{key}-minus" if step == 1 else f"{key}-minus{step}"
+        plus = f"{key}-plus" if step == 1 else f"{key}-plus{step}"
         return [
             InlineKeyboardButton(text=f"➖{step if step > 1 else ''}", callback_data=SettingCB(action="set", value=minus).pack()),
             InlineKeyboardButton(text=label, callback_data=SettingCB(action=section).pack()),
@@ -735,7 +735,7 @@ async def cb_settings(callback: CallbackQuery, callback_data: SettingCB, session
         settings = await services.groups.update_settings(group.id, mutate)
         changed_field = f"{field}={getattr(settings, field)}"
     else:
-        key, _, direction = value.partition(":")
+        key, _, direction = value.partition("-")
         if key in numbers and direction:
             field, min_value, max_value, step = numbers[key]
             if direction.startswith("minus"):
