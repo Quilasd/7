@@ -117,6 +117,14 @@ class HistoryCB(CallbackData, prefix="hist"):
     game_id: int = 0
 
 
+class OwnerCB(CallbackData, prefix="owner"):
+    """OWNER-панель (/owner). Доступен только OWNER_IDS — каждый handler
+    проверяет права на серверной стороне, независимо от callback_data."""
+
+    action: str   # main|stats|players|ratings|xp|achievements|titles|rewards|testgame|debug|system|staff|...
+    value: str = ""
+
+
 class SocialCB(CallbackData, prefix="soc"):
     """Социальные действия: друзья/запросы/избранные/награды."""
 

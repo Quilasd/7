@@ -24,6 +24,14 @@ class ProfileStates(StatesGroup):
     display_name = State()
 
 
+class OwnerStates(StatesGroup):
+    """OWNER-панель (/owner): пошаговый ввод (игрок, число, награда)."""
+
+    player_input = State()   # ввод ID/@username игрока
+    value_input = State()    # ввод числа (рейтинг/победы/XP/уровень)
+    reward_input = State()   # создание ивентовой награды (code|emoji|name|kind|дни|описание)
+
+
 class AdminStates(StatesGroup):
     ban_input = State()
     unban_input = State()

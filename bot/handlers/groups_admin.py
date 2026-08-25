@@ -1233,92 +1233,51 @@ async def cmd_maintenance(message: Message, session, services, group) -> None:
 
 _DEBUG_HELP_TEXT = """👑 <b>СПРАВОЧНИК ВЛАДЕЛЬЦА</b> (уровень 5)
 
+<b>👑 ПОДРОБНОЕ УПРАВЛЕНИЕ — ПАНЕЛЬ /owner</b>
+Кнопки: статистика, игроки, рейтинги, XP/уровни, достижения, титулы,
+ивенты, тестовая игра, debug, система, администрация.
+
 <b>ДИАГНОСТИКА ПРАВ</b>
 {diagnostics}
 
 <b>УРОВНИ АДМИНИСТРАЦИИ</b>
-0 👤 Player — обычный игрок
-1 🛟 Helper — просмотр + мут/unmute
-2 🔨 Moderator — + варн/кик (ДОСТУПА К БАНУ НЕТ)
-3 ⚙️ Admin — + бан/unban, комнаты, старт/стоп игры, DEBUG
-4 🎖 Senior Admin — + настройки, штат, broadcast
-5 👑 Owner — всё (OWNER_IDS в .env)
+0 👤 Player · 1 🛟 Helper — просмотр+мут · 2 🔨 Moderator — +варн/кик
+3 ⚙️ Admin — +бан, комнаты, игры, DEBUG · 4 🎖 Senior Admin — +настройки, штат
+5 👑 Owner — всё (OWNER_IDS). Ручная выдача рейтингов/XP/уровней/достижений — ТОЛЬКО Owner.
 
-<b>👤 ИГРОК</b> (все, везде)
-/start — главное меню · /help — правила · /cancel — отмена ввода и меню
-/profile — профиль 🌐+🏠 · /stats — своя статистика
-/history — мои игры (пагинация) · /game_&lt;ID&gt; — детали партии
-/top · /top_rating · /top_wins · /top_levels — топы 🌐/🏠 с пагинацией
-/group_stats · /global_stats — статистика групп/общая
-/achievements — все достижения (получено/скрыто)
-/level_info — таблица уровней (XP на каждый уровень)
-<code>«Играть» и «Правила» — кнопки главного меню, не команды.</code>
+<b>ОСНОВНЫЕ КОМАНДЫ</b>
+/start · /help · /profile · /stats · /history · /game_&lt;ID&gt; · /top /top_rating
+/top_wins /top_levels · /group_stats /global_stats · /achievements · /level_info
+/friend /accept /decline /unfriend /friends /requests · /ignore /unignore /ignored
+/favorite /unfavorite /favorites · /invite · /note · /cancel
+/titles /title_set · /rewards /reward_activate
 
-<b>👥 СОЦИАЛЬНОЕ</b> (все; цель — ID/@username/reply)
-/friend (+/addfriend /fadd) — заявка в друзья · /accept /decline — ответ
-/friends — список · /unfriend (+/fremove) · /requests — входящие заявки
-/ignore (+/block) /unignore (+/unblock) /ignored — игнор
-/favorite (+/fav) /unfavorite (+/unfav) /favorites — избранное
-/invite — позвать в свою открытую комнату (учитывает игнор)
+<b>МОДЕРАЦИЯ</b> (группа; цель ID/@username/reply; нельзя карать себя и ≥ своего уровня)
+Единицы срока: 30m / 2h / 3d / 1w / 2mo
+/mute /unmute — Helper+ · /warn /unwarn [ID] /warnings — Moderator+
+/kick — Moderator+ · /ban [срок] /unban — ТОЛЬКО Admin+
 
-<b>📜 ЛИЧНОЕ В ИГРЕ</b> (все)
-/note &lt;текст&gt; — предсмертная записка (≤300, одна, утром)
+<b>ГРУППА: ИГРА И КОМНАТЫ</b> (VIEW_STATS: /game /games /game_info /game_players
+/game_phase /rooms /room ID · START_GAME: /game_start /room_force_start /createroom
+STOP_GAME: /game_stop /game_cancel · MANAGE_ROOMS: /game_kill /game_revive
+/room_close /room_kick)
 
-<b>🎓 ТИТУЛЫ · 🎪 НАГРАДЫ</b> (свои — все)
-/titles · /title_set &lt;id&gt; — один активный титул
-/rewards · /reward_activate &lt;id&gt; — одна активная награда
-<code>Глобальный админ: /reward_create code|emoji|name|kind|дни|описание ·
-/reward_list · /reward_grant &lt;цель&gt; code [дни] · /title_grant &lt;цель&gt; &lt;id&gt; ·
-/title_list · /title_remove &lt;цель&gt; &lt;id&gt;</code>
+<b>ШТАТ И НАСТРОЙКИ</b> (MANAGE_STAFF: /staff /staff_add /staff_promote /staff_remove
+/staff_demote /staff_info · /claim · MANAGE_SETTINGS: /settings /set_min_players
+/set_max_players /set_night_time /set_day_time /set_vote_time /set_roles)
 
-<b>📈 ПРОФИЛИ И СТАТИСТИКА</b> (в группе)
-/player · /player_stats &lt;цель&gt; — VIEW_PROFILE
-/players — VIEW_PLAYERS · /staff · /staff_info — VIEW_PLAYERS
+<b>АДМИН И СИСТЕМА</b>
+/player /players — VIEW_PROFILE/VIEW_PLAYERS · /broadcast /announce /logs — BROADCAST
+/botstats — VIEW_STATS · /reload — OWNER+ADMIN_IDS · /maintenance — MANAGE_GLOBAL_SETTINGS
+/title_list /title_grant /title_remove · /reward_create /reward_grant /reward_list
 
-<b>🎮 ИГРА И КОМНАТЫ</b> (в группе)
-Просмотр (VIEW_STATS): /game · /games · /game_info ID ·
-/game_players · /game_phase · /rooms · /room ID
-START_GAME: /game_start · /room_force_start · /createroom
-STOP_GAME: /game_stop · /game_cancel
-MANAGE_ROOMS: /game_kill · /game_revive · /room_close · /room_kick
+<b>DEBUG MODE</b> (USE_DEBUG: Admin+ при debug_enabled группы; Owner — всегда)
+/testgame [4-8|fast] · /debug · /debug_game · /debug_state · /debug_phase · /debug_finish_phase
 
-<b>🔨 МОДЕРАЦИЯ</b> (в группе; цель — ID/@username/reply; нельзя карать себя и уровень ≥ своего)
-Единицы срока: 30m / 2h / 3d / 1w / 2mo (мин/час/день/неделя/месяц)
-/mute [срок] /unmute — MUTE_PLAYER, Helper+ (по умолч. 60 мин)
-/warn [срок] [причина] /unwarn /warnings — WARN_PLAYER, Moderator+
-    /unwarn @u 12 — снять варн #12 по ID · 3/3 → авто-бан на сутки (система)
-/kick — KICK_PLAYER, Moderator+ (реальный кик из группы)
-/ban [срок] [причина] /unban — BAN_PLAYER, ТОЛЬКО Admin+ (у модера бана нет)
-
-<b>👥 ШТАТ</b> (MANAGE_STAFF; нельзя трогать уровень ≥ своего)
-/staff_add &lt;цель&gt; 1-4 · /staff_promote · /staff_remove · /staff_demote
-<code>/claim — создатель группы забирает Senior Admin (4) без MANAGE_STAFF;
-проверяется status="creator" в Telegram, выдача — локально в этой группе.</code>
-
-<b>⚙️ НАСТРОЙКИ ГРУППЫ</b> (MANAGE_SETTINGS, только в группе)
-/settings — inline-меню (Игроки/Таймеры/Роли/Голосование/Рейтинг/XP/Доп.)
-/set_min_players /set_max_players — состав (2–20)
-/set_night_time /set_day_time /set_vote_time — таймеры, сек (30–600)
-/set_roles mafia N|maniac on|off — роли
-
-<b>📣 МАССОВЫЕ И СИСТЕМА</b>
-/broadcast /announce — BROADCAST (рассылка)
-/botstats — VIEW_STATS · /logs — BROADCAST
-/reload — OWNER_IDS+ADMIN_IDS · /maintenance — MANAGE_GLOBAL_SETTINGS
-
-<b>🧪 DEBUG MODE</b> (USE_DEBUG: Admin+ при debug_enabled группы; Owner — всегда)
-/testgame [4-8|fast] — тест-игра с ботами · fast — таймеры по 5 сек
-/debug — статус · /debug_game ID · /debug_state · /debug_phase · /debug_finish_phase
-<code>Статистика тест-игр меняется только при
-DEBUG_AFFECTS_GLOBAL/LOCAL_STATS=true (по умолчанию выключены).</code>
-
-<b>👑 ТОЛЬКО ВЛАДЕЛЬЦУ</b> (OWNER_IDS; проверка серверная)
-/debug_help — этот справочник · /admin — админ-панель
-/set_rating|add_rating &lt;цель&gt; &lt;N&gt; — общий рейтинг · /set_wins|add_wins — победы
-/set_xp|add_xp &lt;цель&gt; &lt;N&gt; — XP (уровень пересчитается сам)
-/set_level &lt;цель&gt; &lt;N&gt; — уровень (XP синхронизируется)
-/achievement_grant|achievement_remove &lt;цель&gt; &lt;id&gt; — ручная выдача достижений
-<code>ADMIN/SENIOR ADMIN вручную менять рейтинг/XP/уровень/достижения НЕ могут.</code>"""
+<b>👑 ТОЛЬКО ВЛАДЕЛЬЦУ</b> (команды; в панели /owner то же кнопками)
+/owner — панель · /debug_help — этот справочник · /admin — админ-панель
+/set_rating|add_rating · /set_wins|add_wins · /set_xp|add_xp · /set_level
+/achievement_grant /achievement_remove"""
 
 
 @router.message(Command("debug_help"))

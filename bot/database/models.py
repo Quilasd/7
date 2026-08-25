@@ -553,3 +553,4 @@ class UserEventReward(Base):
     awarded_by: Mapped[int] = mapped_column(Integer, default=0)
     awarded_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    reward: Mapped["EventReward"] = relationship(lazy="joined")

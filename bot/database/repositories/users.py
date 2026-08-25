@@ -54,6 +54,34 @@ class UserRepository(BaseRepository[User]):
         )
         return list(result.scalars().all())
 
+    async def top_by_wins(self, limit: int = 10) -> list[User]:
+        result = await self.session.execute(
+            select(User)
+            .where(User.is_banned.is_(False), User.is_test.is_(False))
+            .order_by(User.wins.desc(), User.rating.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def top_by_level(self, limit: int = 10) -> list[User]:
+        result = await self.session.execute(
+            select(User)
+            .where(User.is_banned.is_(False), User.is_test.is_(False))
+            .order_by(User.level.desc(), User.xp.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def recent(self, limit: int = 10) -> list[User]:
+        """Последние зарегистрированные игроки."""
+        result = await self.session.execute(
+            select(User)
+            .where(User.is_banned.is_(False), User.is_test.is_(False))
+            .order_by(User.id.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
     async def count_all(self) -> int:
         result = await self.session.execute(
             select(func.count()).select_from(User).where(User.is_banned.is_(False), User.is_test.is_(False))
