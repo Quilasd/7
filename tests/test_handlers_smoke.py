@@ -1078,3 +1078,74 @@ class TestDurationUnits:
         gp = await services.groups.local_player(group.id, noisy.id)
         minutes = (gp.banned_until - utcnow()).total_seconds() / 60
         assert abs(minutes - 24 * 60) < 1  # ровно сутки
+
+
+class TestWarnIds:
+    """У каждого варна свой ID: /warnings показывает #ID, /unwarn снимает по ID."""
+
+    async def _three_warns(self, services, session, group, mod, noisy):
+        # ВНИМАНИЕ: 3-й варн = 3/3 -> авто-бан и сброс; для тестов ID нужно <3
+        for reason in ("спам", "флуд"):
+            msg = FakeMessage(FakeTgUser(mod.telegram_id), f"/warn {noisy.telegram_id} {reason}",
+                              chat=FakeChat(group.telegram_chat_id), bot=FakeBot())
+            await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+
+    async def test_warnings_shows_ids(self, services, session):
+        mod, noisy = await make_user(session, "M"), await make_user(session, "N")
+        group = await services.groups.get_or_create(-608000, "A")
+        await _set_staff(services.session_factory, group.id, mod.id, 2)
+        await self._three_warns(services, session, group, mod, noisy)
+
+        msg = FakeMessage(FakeTgUser(mod.telegram_id), f"/warnings {noisy.telegram_id}",
+                          chat=FakeChat(group.telegram_chat_id), bot=FakeBot())
+        await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+        warns = await services.groups.warnings_of(group.id, noisy.id)
+        assert len(warns) == 2
+        for w in warns:
+            assert any(f"#{w.id}" in t for t in msg.answers), w.id
+        assert any("/unwarn @user" in t for t in msg.answers)  # подсказка
+
+    async def test_unwarn_by_id_removes_exact_warn(self, services, session):
+        mod, noisy = await make_user(session, "M"), await make_user(session, "N")
+        group = await services.groups.get_or_create(-608100, "A")
+        await _set_staff(services.session_factory, group.id, mod.id, 2)
+        await self._three_warns(services, session, group, mod, noisy)
+        warns = await services.groups.warnings_of(group.id, noisy.id)
+        victim = warns[0]  # снимаем ПЕРВЫЙ, а не последний
+
+        msg = FakeMessage(FakeTgUser(mod.telegram_id), f"/unwarn {noisy.telegram_id} {victim.id}",
+                          chat=FakeChat(group.telegram_chat_id), bot=FakeBot())
+        await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+        assert any(f"#{victim.id}" in t and "Активных: 1" in t for t in msg.answers)
+        left = await services.groups.warnings_of(group.id, noisy.id)
+        assert len(left) == 1 and all(w.id != victim.id for w in left)
+
+    async def test_unwarn_wrong_id_says_not_found(self, services, session):
+        mod, noisy = await make_user(session, "M"), await make_user(session, "N")
+        group = await services.groups.get_or_create(-608200, "A")
+        await _set_staff(services.session_factory, group.id, mod.id, 2)
+        msg = FakeMessage(FakeTgUser(mod.telegram_id), f"/warn {noisy.telegram_id} спам",
+                          chat=FakeChat(group.telegram_chat_id), bot=FakeBot())
+        await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+
+        msg = FakeMessage(FakeTgUser(mod.telegram_id), f"/unwarn {noisy.telegram_id} 999999",
+                          chat=FakeChat(group.telegram_chat_id), bot=FakeBot())
+        await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+        assert any("нет активного варна" in t for t in msg.answers)
+        warns = await services.groups.warnings_of(group.id, noisy.id)
+        assert len(warns) == 1  # ничего не снято
+
+    async def test_unwarn_without_id_still_removes_last(self, services, session):
+        mod, noisy = await make_user(session, "M"), await make_user(session, "N")
+        group = await services.groups.get_or_create(-608300, "A")
+        await _set_staff(services.session_factory, group.id, mod.id, 2)
+        await self._three_warns(services, session, group, mod, noisy)
+        before = await services.groups.warnings_of(group.id, noisy.id)
+        last_id = before[-1].id
+
+        msg = FakeMessage(FakeTgUser(mod.telegram_id), f"/unwarn {noisy.telegram_id}",
+                          chat=FakeChat(group.telegram_chat_id), bot=FakeBot())
+        await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+        assert any("последнее предупреждение" in t and "Активных: 1" in t for t in msg.answers)
+        left = await services.groups.warnings_of(group.id, noisy.id)
+        assert len(left) == 1 and all(w.id != last_id for w in left)

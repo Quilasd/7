@@ -305,16 +305,29 @@ class GroupService:
                 "warn": warn,
             }
 
-    async def unwarn(self, group_id: int, target_user_id: int, actor_user_id: int) -> int:
-        """Снимает последний активный варн. Возвращает остаток активных."""
+    async def unwarn(
+        self, group_id: int, target_user_id: int, actor_user_id: int, warn_id: int | None = None
+    ) -> int | None:
+        """Снимает варн: конкретный по warn_id (ID варна) или последний активный.
+
+        Возвращает число оставшихся активных варнов.
+        None — если warn_id указан, но такого АКТИВНОГО варна у цели нет.
+        """
         from bot.database.models import GroupWarning
         from bot.database.repositories.groups import AuditLogRepository
 
         async with self.session_factory() as session:
             active = await self._active_warnings_of(session, group_id, target_user_id)
-            if active:
-                active[-1].revoked = True
-            count = len(active) - 1 if active else 0
+            if warn_id is not None:
+                match = next((w for w in active if w.id == warn_id), None)
+                if match is None:
+                    return None
+                match.revoked = True
+                count = len(active) - 1
+            else:
+                if active:
+                    active[-1].revoked = True
+                count = len(active) - 1 if active else 0
             repo = GroupPlayerRepository(session)
             gp = await repo.ensure(group_id, target_user_id)
             gp.warnings = max(0, count)

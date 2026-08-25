@@ -249,6 +249,7 @@ async def cmd_warns(message: Message, session, group, db_user, services) -> None
     /warn @user 3d спам в чате   — варн на 3 дня с причиной (30m/2h/3d/1w/2mo)
     /warn @user спам             — срок по умолчанию (настройки группы, 7 дней)
     /unwarn @user                — снять последний активный варн
+    /unwarn @user 12             — снять конкретный варн по его ID (виден в /warnings)
     /warnings @user              — список активных с причинами и сроками
     """
     from datetime import timedelta
@@ -278,7 +279,9 @@ async def cmd_warns(message: Message, session, group, db_user, services) -> None
         lines = [f"⚠️ <b>Предупреждения {esc(display_name(target))} — {len(warns)}/{limit}:</b>", ""]
         for w in warns:
             reason = esc(w.reason) if w.reason else "<i>без причины</i>"
-            lines.append(f"• {reason} — истекает {w.expires_at:%d.%m %H:%M}")
+            lines.append(f"• <code>#{w.id}</code> {reason} — истекает {w.expires_at:%d.%m %H:%M}")
+        lines.append("")
+        lines.append("Снять конкретный: <code>/unwarn @user 12</code> · последний: <code>/unwarn @user</code>")
         await message.answer("\n".join(lines))
         return
 
@@ -289,9 +292,22 @@ async def cmd_warns(message: Message, session, group, db_user, services) -> None
         if resolved is None:
             return
         _, target = resolved
-        count = await services.groups.unwarn(group.id, target.id, db_user.id)
+        # /unwarn @user 12 — снять конкретный варн по ID; без ID — последний
+        warn_id = None
+        _, rest = await _target_and_rest(message, session)
+        tokens = rest.split()
+        if tokens and tokens[0].lstrip("-").isdigit():
+            warn_id = int(tokens[0])
+        result = await services.groups.unwarn(group.id, target.id, db_user.id, warn_id=warn_id)
+        if result is None:
+            await message.answer(
+                f"❗ У {esc(display_name(target))} нет активного варна <code>#{warn_id}</code>. "
+                f"Актуальный список: <code>/warnings @{target.username or target.telegram_id}</code>"
+            )
+            return
+        which = f"варн <code>#{warn_id}</code>" if warn_id is not None else "последнее предупреждение"
         await message.answer(
-            f"✅ Снято последнее предупреждение у {esc(display_name(target))}. Активных: {count}."
+            f"✅ Снято {which} у {esc(display_name(target))}. Активных: {result}."
         )
         return
 
@@ -1225,66 +1241,65 @@ _DEBUG_HELP_TEXT = """👑 <b>СПРАВОЧНИК ВЛАДЕЛЬЦА</b> (ур�
 
 <b>УРОВНИ АДМИНИСТРАЦИИ</b>
 0 👤 Player — обычный игрок
-1 🛟 Helper — просмотр, warn
-2 🔨 Moderator — + mute / kick / ban
-3 ⚙️ Admin — + комнаты, старт/стоп игры, DEBUG
+1 🛟 Helper — просмотр + мут/unmute
+2 🔨 Moderator — + варн/кик (ДОСТУПА К БАНУ НЕТ)
+3 ⚙️ Admin — + бан/unban, комнаты, старт/стоп игры, DEBUG
 4 🎖 Senior Admin — + настройки, штат, broadcast
 5 👑 Owner — всё (OWNER_IDS в .env)
 
 <b>👤 ИГРОК</b> (все, везде)
-/play — меню · /profile — профиль 🌐+🏠 · /top — рейтинги
-/rules — правила · /help — помощь · /cancel — отмена
-
-<code>Профиль/рейтинг в группе показывают и локальную 🏠 статистику.</code>
+/start — главное меню · /help — правила · /cancel — отмена ввода и меню
+/profile — профиль 🌐+🏠 · /stats — своя статистика
+/history — мои игры (пагинация) · /game_&lt;ID&gt; — детали партии
+/top · /top_rating · /top_wins · /top_levels — топы 🌐/🏠 с пагинацией
+/group_stats · /global_stats — статистика групп/общая
+<code>«Играть» и «Правила» — кнопки главного меню, не команды.</code>
 
 <b>👥 СОЦИАЛЬНОЕ</b> (все; цель — ID/@username/reply)
-/friend /accept /decline /unfriend · /friends /requests
-/ignore /unignore /ignored · /favorite /unfavorite /favorites
+/friend (+/addfriend /fadd) — заявка в друзья · /accept /decline — ответ
+/friends — список · /unfriend (+/fremove) · /requests — входящие заявки
+/ignore (+/block) /unignore (+/unblock) /ignored — игнор
+/favorite (+/fav) /unfavorite (+/unfav) /favorites — избранное
 /invite — позвать в свою открытую комнату (учитывает игнор)
 
-<b>📜 ИСТОРИЯ И ЗАПИСКИ</b> (все)
-/history — мои игры (пагинация) · /game_&lt;ID&gt; — детали партии
+<b>📜 ЛИЧНОЕ В ИГРЕ</b> (все)
 /note &lt;текст&gt; — предсмертная записка (≤300, одна, утром)
 
-<b>🎓 ТИТУЛЫ · 🎪 НАГРАДЫ</b> (все — только свои данные)
+<b>🎓 ТИТУЛЫ · 🎪 НАГРАДЫ</b> (свои — все)
 /titles · /title_set &lt;id&gt; — один активный титул
 /rewards · /reward_activate &lt;id&gt; — одна активная награда
-<code>/reward_create code|emoji|name|kind|дни|описание · /reward_list,
-/reward_grant &lt;цель&gt; code [дни] · /title_grant &lt;цель&gt; &lt;id&gt; — глобальный админ.</code>
+<code>Глобальный админ: /reward_create code|emoji|name|kind|дни|описание ·
+/reward_list · /reward_grant &lt;цель&gt; code [дни] · /title_grant &lt;цель&gt; &lt;id&gt;</code>
 
-<b>📈 ПРОФИЛИ И СТАТИСТИКА</b>
-/player &lt;ID|@username|reply&gt; — {p1} VIEW_PROFILE
-/player_stats — аналог · /players — VIEW_PLAYERS
-/stats — своя статистика · /group_stats · /global_stats
-/top /top_rating /top_wins /top_levels — топы 🌐/🏠 с пагинацией
+<b>📈 ПРОФИЛИ И СТАТИСТИКА</b> (в группе)
+/player · /player_stats &lt;цель&gt; — VIEW_PROFILE
+/players — VIEW_PLAYERS · /staff · /staff_info — VIEW_PLAYERS
 
-<b>🔨 МОДЕРАЦИЯ</b> (в группе; цель — ID/@username/reply; защита: нельзя карать себя и уровень ≥ своего)
-Единицы срока везде: 30m / 2h / 3d / 1w / 2mo (мин/час/день/неделя/месяц)
-/mute [срок] /unmute — MUTE_PLAYER, Helper+ (Telegram-мут, по умолч. 60 мин)
+<b>🎮 ИГРА И КОМНАТЫ</b> (в группе)
+Просмотр (VIEW_STATS): /game · /games · /game_info ID ·
+/game_players · /game_phase · /rooms · /room ID
+START_GAME: /game_start · /room_force_start · /createroom
+STOP_GAME: /game_stop · /game_cancel
+MANAGE_ROOMS: /game_kill · /game_revive · /room_close · /room_kick
+
+<b>🔨 МОДЕРАЦИЯ</b> (в группе; цель — ID/@username/reply; нельзя карать себя и уровень ≥ своего)
+Единицы срока: 30m / 2h / 3d / 1w / 2mo (мин/час/день/неделя/месяц)
+/mute [срок] /unmute — MUTE_PLAYER, Helper+ (по умолч. 60 мин)
 /warn [срок] [причина] /unwarn /warnings — WARN_PLAYER, Moderator+
-    /warn @u 3d спам — варн на 3 дня; N/limit → авто-бан на сутки (система)
+    /unwarn @u 12 — снять варн #12 по ID · 3/3 → авто-бан на сутки (система)
 /kick — KICK_PLAYER, Moderator+ (реальный кик из группы)
-/ban [срок] [причина] — ТОЛЬКО Admin+ (BAN_PLAYER): со сроком или навсегда
-    (у модератора доступа к бану нет) · /unban — Admin+, снимает и Telegram-бан
+/ban [срок] [причина] /unban — BAN_PLAYER, ТОЛЬКО Admin+ (у модера бана нет)
 
-<b>🎮 ИГРА И КОМНАТЫ</b>
-/game — активная игра в группе · /games — список
-/game_info ID · /game_players · /game_phase
-/game_start — MANAGE_ROOMS · /game_stop /game_cancel — STOP_GAME
-/game_kill /game_revive — STOP_GAME
-/rooms · /room ID · /room_close · /room_kick · /room_force_start
-/createroom — комната с правилами группы — MANAGE_ROOMS
-
-<b>👥 ШТАТ</b> (MANAGE_STAFF; защита: не ≥ своего уровня)
-/staff · /staff_add &lt;цель&gt; 1-4 · /staff_remove
-/staff_promote · /staff_demote · /staff_info
-<code>/claim — создатель группы забирает Senior Admin (4) без прав MANAGE_STAFF;
+<b>👥 ШТАТ</b> (MANAGE_STAFF; нельзя трогать уровень ≥ своего)
+/staff_add &lt;цель&gt; 1-4 · /staff_promote · /staff_remove · /staff_demote
+<code>/claim — создатель группы забирает Senior Admin (4) без MANAGE_STAFF;
 проверяется status="creator" в Telegram, выдача — локально в этой группе.</code>
 
 <b>⚙️ НАСТРОЙКИ ГРУППЫ</b> (MANAGE_SETTINGS, только в группе)
 /settings — inline-меню (Игроки/Таймеры/Роли/Голосование/Рейтинг/XP/Доп.)
-/set_min_players /set_max_players · /set_night_time /set_day_time
-/set_vote_time · /set_roles mafia N|maniac on|off
+/set_min_players /set_max_players — состав (2–20)
+/set_night_time /set_day_time /set_vote_time — таймеры, сек (30–600)
+/set_roles mafia N|maniac on|off — роли
 
 <b>📣 МАССОВЫЕ И СИСТЕМА</b>
 /broadcast /announce — BROADCAST (рассылка)
@@ -1292,17 +1307,13 @@ _DEBUG_HELP_TEXT = """👑 <b>СПРАВОЧНИК ВЛАДЕЛЬЦА</b> (ур�
 /reload — OWNER_IDS+ADMIN_IDS · /maintenance — MANAGE_GLOBAL_SETTINGS
 
 <b>🧪 DEBUG MODE</b> (USE_DEBUG: Admin+ при debug_enabled группы; Owner — всегда)
-/testgame [4-8|fast] — тест-игра с ботами
-/testgame fast — таймеры по 5 сек
-/debug — статус · /debug_game ID · /debug_state
-/debug_phase · /debug_finish_phase
-
+/testgame [4-8|fast] — тест-игра с ботами · fast — таймеры по 5 сек
+/debug — статус · /debug_game ID · /debug_state · /debug_phase · /debug_finish_phase
 <code>Статистика тест-игр меняется только при
-DEBUG_AFFECTS_GLOBAL/LOCAL_STATS=true в .env (по умолчанию выключены).</code>
+DEBUG_AFFECTS_GLOBAL/LOCAL_STATS=true (по умолчанию выключены).</code>
 
 <b>👑 ТОЛЬКО ВЛАДЕЛЬЦУ</b>
-/debug_help — этот справочник
-/admin — админ-панель (OWNER_IDS + ADMIN_IDS)"""
+/debug_help — этот справочник · /admin — админ-панель"""
 
 
 @router.message(Command("debug_help"))
