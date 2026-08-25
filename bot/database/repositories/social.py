@@ -263,9 +263,29 @@ class UserAchievementRepository(BaseRepository[UserAchievement]):
         )
         return int(result.scalar_one())
 
+    async def remove(self, user_id: int, achievement_id: str) -> bool:
+        """Снимает достижение вручную (OWNER). True — если оно было."""
+        result = await self.session.execute(
+            delete(UserAchievement).where(
+                UserAchievement.user_id == user_id,
+                UserAchievement.achievement_id == achievement_id,
+            )
+        )
+        return bool(result.rowcount)
+
 
 class UserTitleRepository(BaseRepository[UserTitle]):
     model = UserTitle
+
+    async def remove(self, user_id: int, title_id: str, source: str | None = None) -> bool:
+        """Снимает открытый титул (опционально только с данным source)."""
+        stmt = delete(UserTitle).where(
+            UserTitle.user_id == user_id, UserTitle.title_id == title_id
+        )
+        if source is not None:
+            stmt = stmt.where(UserTitle.source == source)
+        result = await self.session.execute(stmt)
+        return bool(result.rowcount)
 
     async def unlock(self, user_id: int, title_id: str, source: str = "achievement") -> bool:
         result = await self.session.execute(

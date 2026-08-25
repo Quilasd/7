@@ -21,33 +21,33 @@ router = Router()
 
 
 def profile_text(user, header: bool = True, progression=None, ranks=None, extras=None) -> str:
-    """Глобальный блок профиля (статистика User, не зависит от групп).
+    """Компактный глобальный блок профиля (статистика User, не зависит от групп).
 
     ranks: {'rating': int, 'wins': int, 'level': int} — позиции в рейтинге.
     extras: {'title': str, 'event_reward': str, 'achievements': 'X/Y',
              'win_streak': int, 'best_win_streak': int} — доп. блоки.
     """
-    from bot.services.progression import DEFAULT_PROGRESSION
-
-    progression = progression or DEFAULT_PROGRESSION
     ranks = ranks or {}
     extras = extras or {}
     total = user.wins + user.losses
     winrate = (user.wins / total * 100) if total else 0.0
-    _, in_level, need = progression.xp_progress_in_level(user.xp)
 
     def _rank(key: str) -> str:
         pos = ranks.get(key)
-        return f" (#{pos})" if pos else ""
+        return f" <code>(#{pos})</code>" if pos else ""
 
     lines = ["🌐 <b>ГЛОБАЛЬНО</b>", ""]
-    # компактный рейтинг-блок: общий/победы/уровень с позициями в топе
     lines.append(f"⭐ Общий: <b>{user.rating}</b>{_rank('rating')}")
     lines.append(f"🏆 Побед: <b>{user.wins}</b>{_rank('wins')}")
     lines.append(f"📈 Уровень: <b>{user.level}</b>{_rank('level')}")
+    lines.append(f"✨ XP: <b>{user.xp}</b>")
+    lines.append("")
+    lines.append(
+        f"🎮 Игр: <b>{user.games_played}</b> · 💀 Поражений: <b>{user.losses}</b> · 📊 {winrate:.0f}%"
+    )
     streak = extras.get("win_streak", 0)
     best = extras.get("best_win_streak", 0)
-    lines.append(f"🔥 Серия побед: <b>{streak}</b> / 🏆 Лучшая серия: <b>{best}</b>")
+    lines.append(f"🔥 Серия: <b>{streak}</b> · 🏆 Лучшая: <b>{best}</b>")
     badge_lines = []
     if extras.get("title"):
         badge_lines.append(f"🎓 Титул: {extras['title']}")
@@ -56,15 +56,8 @@ def profile_text(user, header: bool = True, progression=None, ranks=None, extras
     if extras.get("achievements"):
         badge_lines.append(f"🏅 Достижения: {extras['achievements']}")
     if badge_lines:
-        lines.append("\n".join(badge_lines))
-    lines += [
-        "",
-        f"✨ XP: <b>{user.xp}</b> (до следующего уровня {in_level}/{need})",
-        f"💀 Поражений: <b>{user.losses}</b>  ·  🎮 Игр: <b>{user.games_played}</b>  ·  📈 Winrate: <b>{winrate:.0f}%</b>",
-        "",
-        f"☠️ Убийств: <b>{user.kills}</b>  ·  ❤️ Спасений: <b>{user.saves}</b>",
-        f"🕵️ Расследований: <b>{user.investigations}</b>  ·  🗳 Верный голос: <b>{user.correct_votes}</b>",
-    ]
+        lines.append("")
+        lines += badge_lines
     if header:
         head = [
             f"👤 <b>{esc(display_name(user))}</b>",
@@ -76,36 +69,33 @@ def profile_text(user, header: bool = True, progression=None, ranks=None, extras
 
 
 def profile_group_block(group, group_player, progression=None, ranks=None) -> str:
-    """Локальный блок: статистика игрока В КОНКРЕТНОЙ группе (GroupPlayer).
+    """Компактный локальный блок: только рейтинг/победы/уровень с местами в группе.
 
+    Без XP, winrate, поражений, серий и игровой статистики — они глобальные
+    и не дублируются (профиль не должен быть перегружен).
     ranks: {'rating': int, 'wins': int, 'level': int} — позиции в топе группы.
     """
-    from bot.services.progression import DEFAULT_PROGRESSION
-
-    progression = progression or DEFAULT_PROGRESSION
     ranks = ranks or {}
     gp = group_player
-    total = gp.wins + gp.losses
-    winrate = (gp.wins / total * 100) if total else 0.0
-    _, in_level, need = progression.xp_progress_in_level(gp.xp)
-    streak = getattr(gp, "win_streak", 0) or 0
-    best = getattr(gp, "best_win_streak", 0) or 0
 
     def _rank(key: str) -> str:
         pos = ranks.get(key)
-        return f" (#{pos})" if pos else ""
+        return f" <code>(#{pos})</code>" if pos else ""
 
+    title = esc(group.title) if getattr(group, "title", None) else "группа"
     return "\n".join([
-        f"🏠 <b>ЭТА ГРУППА</b>\n<i>{esc(group.title or '')}</i>\n",
-        f"⭐ Общий: <b>{gp.rating}</b>{_rank('rating')}",
-        f"🏆 Побед: <b>{gp.wins}</b>{_rank('wins')}",
-        f"📈 Уровень: <b>{gp.level}</b>{_rank('level')}",
-        f"🔥 Серия: <b>{streak}</b> / 🏆 Лучшая: <b>{best}</b>",
-        f"✨ XP: <b>{gp.xp}</b> (до следующего уровня {in_level}/{need})",
-        f"💀 Поражений: <b>{gp.losses}</b>  ·  🎮 Игр: <b>{gp.games_played}</b>  ·  📈 Winrate: <b>{winrate:.0f}%</b>",
-        "",
-        f"☠️ Убийств: <b>{gp.kills}</b>  ·  ❤️ Спасений: <b>{gp.saves}</b>",
-        f"🕵️ Расследований: <b>{gp.investigations}</b>  ·  🗳 Верный голос: <b>{gp.correct_votes}</b>",
+        f"🏠 <b>В ЭТОЙ ГРУППЕ</b> · <i>{title}</i>",
+        f"⭐ <b>{gp.rating}</b>{_rank('rating')} · 🏆 <b>{gp.wins}</b>{_rank('wins')}"
+        f" · 📈 Ур. <b>{gp.level}</b>{_rank('level')}",
+    ])
+
+
+def profile_game_stats(user) -> str:
+    """Игровая статистика (глобальная) — отдельный блок внизу профиля."""
+    return "\n".join([
+        "⚔️ <b>В ИГРЕ</b>",
+        f"☠️ Убийств: <b>{user.kills}</b> · ❤️ Спасений: <b>{user.saves}</b>",
+        f"🕵️ Расследований: <b>{user.investigations}</b> · 🗳 Верных голосов: <b>{user.correct_votes}</b>",
     ])
 
 
@@ -193,9 +183,10 @@ async def _full_profile_text(session, services, db_user, group) -> str:
                 "wins": await group_repo.rank_in_group(group.id, "wins", gp.wins),
                 "level": await group_repo.rank_in_group(group.id, "level", gp.level, gp.xp),
             }
-            text += "\n\n———\n\n" + profile_group_block(group, gp, ranks=local_ranks)
+            text += "\n\n" + profile_group_block(group, gp, ranks=local_ranks)
         else:
             text += "\n\n🏠 Статистики в этой группе пока нет."
+    text += "\n\n━━━━━━━━━━━━━━━━━━\n\n" + profile_game_stats(db_user)
     return text
 
 

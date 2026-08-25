@@ -81,7 +81,7 @@ def _group_or_reply(event, group: Group | None):
 
 @router.message(Command("player", "player_stats"))
 async def cmd_player(message: Message, command: CommandObject, session, db_user, group, services) -> None:
-    from bot.handlers.profile import profile_group_block, profile_text
+    from bot.handlers.profile import _full_profile_text
 
     args = (command.args or "").strip()
     target = db_user
@@ -97,11 +97,8 @@ async def cmd_player(message: Message, command: CommandObject, session, db_user,
                 await _deny(message, Permission.VIEW_PROFILE)
                 return
         target = found
-    await message.answer(f"<b>{esc(display_name(target))}</b>\n\n{profile_text(target, header=False)}")
-    if group is not None:
-        gp = await GroupPlayerRepository(session).get_membership(group.id, target.id)
-        if gp:
-            await message.answer(profile_group_block(group, gp))
+    # единый полный профиль (глобальный блок + локальный группы + игровая статистика)
+    await message.answer(await _full_profile_text(session, services, target, group))
 
 
 @router.message(Command("players"))
@@ -1254,6 +1251,7 @@ _DEBUG_HELP_TEXT = """👑 <b>СПРАВОЧНИК ВЛАДЕЛЬЦА</b> (ур�
 /top · /top_rating · /top_wins · /top_levels — топы 🌐/🏠 с пагинацией
 /group_stats · /global_stats — статистика групп/общая
 /achievements — все достижения (получено/скрыто)
+/level_info — таблица уровней (XP на каждый уровень)
 <code>«Играть» и «Правила» — кнопки главного меню, не команды.</code>
 
 <b>👥 СОЦИАЛЬНОЕ</b> (все; цель — ID/@username/reply)
@@ -1270,7 +1268,8 @@ _DEBUG_HELP_TEXT = """👑 <b>СПРАВОЧНИК ВЛАДЕЛЬЦА</b> (ур�
 /titles · /title_set &lt;id&gt; — один активный титул
 /rewards · /reward_activate &lt;id&gt; — одна активная награда
 <code>Глобальный админ: /reward_create code|emoji|name|kind|дни|описание ·
-/reward_list · /reward_grant &lt;цель&gt; code [дни] · /title_grant &lt;цель&gt; &lt;id&gt;</code>
+/reward_list · /reward_grant &lt;цель&gt; code [дни] · /title_grant &lt;цель&gt; &lt;id&gt; ·
+/title_list · /title_remove &lt;цель&gt; &lt;id&gt;</code>
 
 <b>📈 ПРОФИЛИ И СТАТИСТИКА</b> (в группе)
 /player · /player_stats &lt;цель&gt; — VIEW_PROFILE
@@ -1313,8 +1312,13 @@ MANAGE_ROOMS: /game_kill · /game_revive · /room_close · /room_kick
 <code>Статистика тест-игр меняется только при
 DEBUG_AFFECTS_GLOBAL/LOCAL_STATS=true (по умолчанию выключены).</code>
 
-<b>👑 ТОЛЬКО ВЛАДЕЛЬЦУ</b>
-/debug_help — этот справочник · /admin — админ-панель"""
+<b>👑 ТОЛЬКО ВЛАДЕЛЬЦУ</b> (OWNER_IDS; проверка серверная)
+/debug_help — этот справочник · /admin — админ-панель
+/set_rating|add_rating &lt;цель&gt; &lt;N&gt; — общий рейтинг · /set_wins|add_wins — победы
+/set_xp|add_xp &lt;цель&gt; &lt;N&gt; — XP (уровень пересчитается сам)
+/set_level &lt;цель&gt; &lt;N&gt; — уровень (XP синхронизируется)
+/achievement_grant|achievement_remove &lt;цель&gt; &lt;id&gt; — ручная выдача достижений
+<code>ADMIN/SENIOR ADMIN вручную менять рейтинг/XP/уровень/достижения НЕ могут.</code>"""
 
 
 @router.message(Command("debug_help"))

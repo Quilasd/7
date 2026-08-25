@@ -751,11 +751,19 @@ class TestProfileButtonRegression:
         assert "ГЛОБАЛЬНО" in text
         assert "⭐ Общий: <b>1428</b>" in text
         assert "(#" in text
-        # локальный scope (не заменён глобальным!)
-        assert "ЭТА ГРУППА" in text
-        assert "⭐ Общий: <b>386</b> (#1)" in text
-        assert "🏆 Побед: <b>14</b> (#1)" in text
-        assert "📈 Уровень: <b>7</b> (#1)" in text
+        # локальный scope (не заменён глобальным!) — компактный блок
+        assert "В ЭТОЙ ГРУППЕ" in text
+        assert "Клуб" in text                       # название группы
+        assert "⭐ <b>386</b> <code>(#1)</code>" in text
+        assert "🏆 <b>14</b> <code>(#1)</code>" in text
+        assert "📈 Ур. <b>7</b> <code>(#1)</code>" in text
+        # локальный блок НЕ дублирует глобальную статистику
+        assert "Winrate" not in text.split("В ЭТОЙ ГРУППЕ")[1]
+        assert "Серия" not in text.split("В ЭТОЙ ГРУППЕ")[1]
+        # глобальный блок на месте и не смешан с локальным
+        assert "⭐ Общий: <b>1428</b>" in text
+        # игровая статистика — отдельным блоком внизу
+        assert "В ИГРЕ" in text and "☠️ Убийств" in text
 
     async def test_profile_command_and_settings_callback_ok(self, services, session, monkeypatch):
         """Соседние точки входа профиля (/profile, кнопка Настройки) не регрессировали."""
@@ -788,7 +796,10 @@ class TestProfileButtonRegression:
                              correct_votes=0, win_streak=1, best_win_streak=2)
         group = SimpleNamespace(title="G")
         text = pf.profile_group_block(group, gp)
-        assert "ЭТА ГРУППА" in text and "⭐ Общий: <b>10</b>" in text
+        assert "В ЭТОЙ ГРУППЕ" in text and "G" in text
+        assert "⭐ <b>10</b>" in text and "🏆 <b>3</b>" in text and "Ур. <b>2</b>" in text
+        # без дублирования глобальной статистики
+        assert "XP" not in text and "Winrate" not in text
 
 
 # ------------------------------------------------------- модерация 2.0 (A+B)
@@ -1216,5 +1227,56 @@ class TestAchievementsCommand:
             session=session, services=services, db_user=user, group=group,
         )
         text = msg.answers[0]
-        assert "ГЛОБАЛЬНО" in text and "ЭТА ГРУППА" in text
-        assert "⭐ Общий: <b>386</b>" in text
+        assert "ГЛОБАЛЬНО" in text and "В ЭТОЙ ГРУППЕ" in text
+        assert "⭐ <b>386</b>" in text          # компактный локальный блок
+        assert "⭐ Общий:" in text              # глобальный блок не пропал
+        assert "☠️ Убийств" in text            # игровая статистика внизу
+
+
+class TestMenuCallbacksSmoke:
+    """Регрессии кнопок главного меню: каждая вызывается без падений."""
+
+    async def test_main_menu_buttons_render(self, services, session, monkeypatch):
+        import bot.handlers.ratings as rt
+        import bot.handlers.rooms as rm
+        import bot.handlers.start as st
+
+        user = await make_user(session, "Clicker")
+        group = await services.groups.get_or_create(-611000, "G")
+        captured: list[str] = []
+
+        async def fake_edit(cb, text, kb=None):
+            captured.append(text)
+
+        for mod in (st, pf, rt, rm):
+            monkeypatch.setattr(mod, "edit_or_answer", fake_edit)
+
+        cases = [
+            (st.cb_main, dict(callback=FakeCallback(FakeTgUser(user.telegram_id)))),
+            (st.cb_rules, dict(callback=FakeCallback(FakeTgUser(user.telegram_id)))),
+            (st.cb_play, dict(callback=FakeCallback(FakeTgUser(user.telegram_id)),
+                              session=session, db_user=user)),
+            (pf.cb_settings, dict(callback=FakeCallback(FakeTgUser(user.telegram_id)),
+                                  session=session, services=services, db_user=user)),
+            (rt.cb_menu_rating, dict(callback=FakeCallback(FakeTgUser(user.telegram_id)),
+                                     session=session, group=None)),
+            (rt.cb_menu_rating, dict(callback=FakeCallback(FakeTgUser(user.telegram_id)),
+                                     session=session, group=group)),
+            (rm.cb_find_refresh, dict(callback=FakeCallback(FakeTgUser(user.telegram_id)),
+                                      session=session, db_user=user)),
+        ]
+        for handler, data in cases:
+            captured.clear()
+            cb = data["callback"]
+            cb.answers.clear()
+            await call_like_aiogram(handler, **data)
+            # что-то отрисовали (edit или answer) — не упало
+            assert captured or cb.answers, handler.__name__
+
+        # рейтинг в группе — локальный топ; в личке — глобальный (не смешиваются)
+        cb_group = FakeCallback(FakeTgUser(user.telegram_id))
+        await call_like_aiogram(rt.cb_menu_rating, callback=cb_group,
+                                session=session, group=group)
+        cb_private = FakeCallback(FakeTgUser(user.telegram_id))
+        await call_like_aiogram(rt.cb_menu_rating, callback=cb_private,
+                                session=session, group=None)

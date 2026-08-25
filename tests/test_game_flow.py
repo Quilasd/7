@@ -580,3 +580,107 @@ class TestAchievementsAndTitles:
             second = await rw.award_achievements(s, earned)
             await s.commit()
             assert second.get(uid) is None or second.get(uid) == []
+
+
+class TestMetaAfterFullGame:
+    """После РЕАЛЬНОЙ партии: достижения, титулы, история, профиль, global/local."""
+
+    async def test_achievements_titles_history_profile_after_game(
+        self, services, session, notifier
+    ):
+        from bot.database.repositories.groups import GroupPlayerRepository
+        from bot.database.repositories.social import UserAchievementRepository
+        from bot.handlers.profile import _full_profile_text, compute_profile_extras
+        from bot.services.progression import DEFAULT_PROGRESSION as prog
+
+        users = [await make_user(session, f"M{i}") for i in range(1, 7)]
+        # играем В ГРУППЕ: локальная статистика обязана обновиться тоже
+        group = await services.groups.get_or_create(-610000, "Мафия Клуб")
+        for u in users:
+            await GroupPlayerRepository(session).ensure(group.id, u.id)
+        await session.commit()
+
+        room = await make_room(session, users[0], users,
+                               roles_setup={"mafia": 1, "detective": 1, "doctor": 1})
+        room.group_id = group.id
+        await session.commit()
+        for u in users:
+            await make_ready(session, room, u)
+        result = await services.games.start_game_from_room(room.id, users[0].id)
+        assert result.ok, result.message
+        async with services.session_factory() as s:
+            from bot.database.repositories.rooms import RoomRepository
+
+            game_id = await RoomRepository(s).get(room.id)
+            game_id = game_id.game_id
+
+        roles = await _roles_map(services, game_id)
+        mafia_uid = next(uid for uid, r in roles.items() if r == "mafia")
+        detective_uid = next(uid for uid, r in roles.items() if r == "detective")
+        citizen_uid = next(uid for uid, r in roles.items() if r == "citizen")
+
+        # Ночь 1: мафия убивает детектива; день: город вешает мафию -> победа города
+        await services.phases.begin_game(game_id)
+        kill = await services.games.submit_night_action(game_id, mafia_uid, "kill", detective_uid)
+        assert kill.ok
+        await services.phases.end_night(game_id)
+        await services.phases.begin_voting(game_id)
+        for uid in roles:
+            if uid != mafia_uid and uid != detective_uid:
+                assert (await services.games.cast_vote(game_id, uid, mafia_uid)).ok
+        await services.phases.end_voting(game_id)
+
+        async with services.session_factory() as s2:
+            game = await GameRepository(s2).get(game_id)
+            assert game.status == GameStatus.ENDED.value
+            assert game.winner == "city"
+
+        # --- достижения: автоматическая выдача работает и после правок профиля
+        async with services.session_factory() as s2:
+            ach_repo = UserAchievementRepository(s2)
+            winner_ach = await ach_repo.ids_of(citizen_uid)
+            # первая победа + победа городом + верный голос против мафии
+            assert {"first_win", "city_win", "sharp_eye"} <= winner_ach
+            mafia_ach = await ach_repo.ids_of(mafia_uid)
+            assert "first_win" not in mafia_ach  # мафия проиграла
+
+        # --- титулы, открытые достижениями
+        from bot.database.repositories.social import UserTitleRepository
+
+        async with services.session_factory() as s2:
+            titles = await UserTitleRepository(s2).ids_of(citizen_uid)
+            assert "rookie" in titles and "veteran" in titles
+
+        # --- уведомление о достижении игроку
+        assert any("достижение" in text.lower() for _, text, _ in notifier.sent)
+
+        # --- история партий
+        async with services.session_factory() as s2:
+            history = await GamePlayerRepository(s2).history_for_user(citizen_uid, 10)
+            assert len(history) == 1 and history[0].game_id == game_id
+
+        # --- профиль: достижения, места, XP->уровень, глобальный+локальный блоки
+        async with services.session_factory() as s2:
+            from bot.database.repositories.users import UserRepository
+
+            winner = await UserRepository(s2).get_by_id(citizen_uid)
+            data = await compute_profile_extras(s2, winner, services)
+            assert data["extras"]["achievements"] == "3/12"
+            assert data["ranks"]["rating"] == 1  # лучший рейтинг после игры
+            assert winner.level == prog.level_for_xp(winner.xp)  # уровень соответствует XP
+            profile = await _full_profile_text(s2, services, winner, group)
+            assert "🏅 Достижения: 3/12" in profile
+            assert "⭐ Общий: <b>112</b> <code>(#1)</code>" in profile  # глобальный рейтинг
+            assert "В ЭТОЙ ГРУППЕ" in profile               # локальный блок
+            assert "В ИГРЕ" in profile                      # игровая статистика внизу
+
+        # --- локальная статистика группы обновилась и не смешалась с глобальной
+        async with services.session_factory() as s2:
+            gp_repo = GroupPlayerRepository(s2)
+            gp = await gp_repo.get_membership(group.id, citizen_uid)
+            assert gp.wins == 1 and gp.rating == 112 and gp.xp == 42
+            assert gp.level == prog.level_for_xp(gp.xp)
+            gp_mafia = await gp_repo.get_membership(group.id, mafia_uid)
+            assert gp_mafia.losses == 1
+            # место в группе пересчитано: победитель выше проигравшего
+            assert await gp_repo.rank_in_group(group.id, "rating", gp.rating) == 1

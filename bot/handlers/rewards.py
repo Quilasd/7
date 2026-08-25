@@ -132,6 +132,49 @@ async def cmd_title_grant(message: Message, command: CommandObject, session, ser
         await message.answer("Неизвестный титул.")
 
 
+@router.message(Command("title_list"))
+async def cmd_title_list(message: Message, services) -> None:
+    """Каталог титулов (глобальная администрация)."""
+    if not _is_global_admin(services, message.from_user.id):
+        return
+    from bot.services import titles as t
+
+    unlocks = {v: k for k, v in t.TITLE_UNLOCKS.items()}
+    lines = ["🎓 <b>КАТАЛОГ ТИТУЛОВ</b>", ""]
+    for title in t._ALL_TITLES:  # noqa: SLF001
+        src = unlocks.get(title.id)
+        how = f"за достижение <code>{src}</code>" if src else "выдаётся админом/ивентом"
+        lines.append(f"{title.emoji} <b>{title.name}</b> <code>({title.id})</code> — {how}")
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("title_remove"))
+async def cmd_title_remove(message: Message, command: CommandObject, session, services) -> None:
+    """Снять выданный титул (глобальная администрация)."""
+    if not _is_global_admin(services, message.from_user.id):
+        return
+    tokens = (command.args or "").split()
+    if len(tokens) < 2:
+        await message.answer("Формат: <code>/title_remove @username|id title_id</code>")
+        return
+    target = await _resolve(session, message, command)
+    if target is None:
+        await message.answer("Игрок не найден.")
+        return
+    from bot.database.repositories.social import UserTitleRepository
+
+    removed = await UserTitleRepository(session).remove(target.id, tokens[1])
+    if target.active_title == tokens[1]:
+        target.active_title = None
+    await session.commit()
+    if removed:
+        title = ttl.get_title(tokens[1])
+        name = title.name if title else tokens[1]
+        await message.answer(f"🎓 Титул «{name}» снят с {esc(display_name(target))}.")
+    else:
+        await message.answer("У игрока нет такого титула.")
+
+
 # --------------------------------------------------- игроки: свои титулы/награды
 
 @router.message(Command("titles"))

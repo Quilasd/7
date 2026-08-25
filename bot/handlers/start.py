@@ -10,7 +10,6 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from bot.database.repositories.games import GamePlayerRepository
 from bot.database.repositories.rooms import RoomRepository
-from bot.database.repositories.users import UserRepository
 from bot.keyboards.common import back_to_menu_kb, main_menu_kb
 from bot.keyboards.room import rooms_list_kb
 from bot.utils.callbacks import GameCB, MenuCB
@@ -92,17 +91,9 @@ async def cb_rules(callback: CallbackQuery) -> None:
     await edit_or_answer(callback, RULES, back_to_menu_kb())
 
 
-@router.callback_query(MenuCB.filter(F.action == "rating"))
-async def cb_rating(callback: CallbackQuery, session) -> None:
-    repo = UserRepository(session)
-    top = await repo.top_by_rating(10)
-    lines = ["🏆 <b>РЕЙТИНГ ИГРОКОВ</b>", ""]
-    if not top:
-        lines.append("Пока пусто — стань первым!")
-    for index, user in enumerate(top, start=1):
-        medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(index, f"{index}.")
-        lines.append(f"{medal} {esc(display_name(user))} — {user.rating} (Lvl {user.level})")
-    await edit_or_answer(callback, "\n".join(lines), back_to_menu_kb())
+# Кнопка 📊 Рейтинг обрабатывается в ratings.py (cb_menu_rating): роутер ratings
+# подключается РАНЬДЕ start, поэтому обработчик здесь был недостижимым дубликатом
+# и удалён во избежание конфликтов callback_data.
 
 
 def _active_game_kb(game_id: int) -> InlineKeyboardMarkup:
