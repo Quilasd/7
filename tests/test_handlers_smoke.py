@@ -58,6 +58,22 @@ class FakeBot:
             raise TelegramAPIError(method="getChatMember", message="forbidden")
         return SimpleNamespace(status=self.member_status)
 
+    async def ban_chat_member(self, chat_id: int, user_id: int, until_date=None, **kw) -> bool:
+        """Telegram-бан (до until_date, если задан)."""
+        self.calls.append({"method": "ban_chat_member", "chat_id": chat_id,
+                           "user_id": user_id, "until_date": until_date})
+        if self.fail:
+            raise TelegramAPIError(method="banChatMember", message="not enough rights")
+        return True
+
+    async def unban_chat_member(self, chat_id: int, user_id: int, only_if_banned: bool = False, **kw) -> bool:
+        """Telegram-разбан."""
+        self.calls.append({"method": "unban_chat_member", "chat_id": chat_id,
+                           "user_id": user_id, "only_if_banned": only_if_banned})
+        if self.fail:
+            raise TelegramAPIError(method="unbanChatMember", message="not enough rights")
+        return True
+
     async def set_my_commands(self, commands, scope=None) -> bool:
         """Регистрация меню «/» — записываем вызов для проверок в тестах."""
         self.calls.append({"method": "set_my_commands", "commands": commands, "scope": scope})
@@ -183,7 +199,7 @@ class TestModerationCommands:
         msg = FakeMessage(FakeTgUser(mod.telegram_id), "/warn",
                           chat=FakeChat(group.telegram_chat_id), reply=reply)
         await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
-        assert any("выдано предупреждение" in t for t in msg.answers)
+        assert any("предупреждение" in t and "1/3" in t for t in msg.answers)
         gp = await services.groups.local_player(group.id, noisy.id)
         assert gp is not None and gp.warnings == 1
 
@@ -773,3 +789,188 @@ class TestProfileButtonRegression:
         group = SimpleNamespace(title="G")
         text = pf.profile_group_block(group, gp)
         assert "ЭТА ГРУППА" in text and "⭐ Общий: <b>10</b>" in text
+
+
+# ------------------------------------------------------- модерация 2.0 (A+B)
+
+class TestModerationV2Rights:
+    """Новое распределение прав: мут — Helper, варн/кик/врембан — Moderator,
+    постоянный бан/разбан — Admin. Плюс защита иерархии."""
+
+    async def test_helper_can_mute_cannot_warn(self, services, session):
+        helper = await make_user(session, "H")
+        noisy = await make_user(session, "N")
+        group = await services.groups.get_or_create(-605000, "A")
+        await _set_staff(services.session_factory, group.id, helper.id, 1)
+
+        reply = FakeMessage(FakeTgUser(noisy.telegram_id), "x")
+        mmsg = FakeMessage(FakeTgUser(helper.telegram_id), "/mute",
+                           chat=FakeChat(group.telegram_chat_id), reply=reply,
+                           bot=FakeBot())
+        await ga.cmd_mute(mmsg, session=session, group=group, db_user=helper, services=services)
+        assert any("мут" in t for t in mmsg.answers)
+
+        wmsg = FakeMessage(FakeTgUser(helper.telegram_id), "/warn",
+                           chat=FakeChat(group.telegram_chat_id), reply=FakeMessage(
+                               FakeTgUser(noisy.telegram_id), "x"))
+        await ga.cmd_warns(wmsg, session=session, group=group, db_user=helper, services=services)
+        assert any("WARN_PLAYER" in t for t in wmsg.answers)  # варна у Helper больше нет
+
+    async def test_mod_cannot_permanent_ban_player_cannot_ban(self, services, session):
+        mod = await make_user(session, "M")
+        bad = await make_user(session, "B")
+        group = await services.groups.get_or_create(-605100, "A")
+        await _set_staff(services.session_factory, group.id, mod.id, 2)
+
+        reply = FakeMessage(FakeTgUser(bad.telegram_id), "x")
+        msg = FakeMessage(FakeTgUser(mod.telegram_id), "/ban",
+                          chat=FakeChat(group.telegram_chat_id), reply=reply, bot=FakeBot())
+        await ga.cmd_ban(msg, session=session, group=group, db_user=mod, services=services)
+        # модеру без срока -> бан на сутки по умолчанию (временный), не навсегда
+        assert any("до" in t and "навсегда" not in t for t in msg.answers)
+        gp = await services.groups.local_player(group.id, bad.id)
+        assert gp.is_banned and gp.banned_until is not None
+
+        pmsg = FakeMessage(FakeTgUser(bad.telegram_id), "/ban",
+                           chat=FakeChat(group.telegram_chat_id),
+                           reply=FakeMessage(FakeTgUser(mod.telegram_id), "x"), bot=FakeBot())
+        await ga.cmd_ban(pmsg, session=session, group=group, db_user=bad, services=services)
+        assert any("TEMP_BAN_PLAYER" in t for t in pmsg.answers)  # обычный игрок не может
+
+    async def test_mod_temp_ban_capped_to_7_days(self, services, session):
+        mod = await make_user(session, "M")
+        bad = await make_user(session, "B")
+        group = await services.groups.get_or_create(-605200, "A")
+        await _set_staff(services.session_factory, group.id, mod.id, 2)
+
+        msg = FakeMessage(FakeTgUser(mod.telegram_id), f"/ban {bad.telegram_id} 30d спамит",
+                          chat=FakeChat(group.telegram_chat_id), bot=FakeBot())
+        await ga.cmd_ban(msg, session=session, group=group, db_user=mod, services=services)
+        assert any("урезан до 7 дней" in t for t in msg.answers)
+        gp = await services.groups.local_player(group.id, bad.id)
+        assert gp.banned_until is not None
+
+    async def test_admin_ban_permanent_and_unban_lifts_telegram(self, services, session):
+        admin = await make_user(session, "A")
+        bad = await make_user(session, "B")
+        group = await services.groups.get_or_create(-605300, "A")
+        await _set_staff(services.session_factory, group.id, admin.id, 3)
+
+        bot = FakeBot()
+        msg = FakeMessage(FakeTgUser(admin.telegram_id), f"/ban {bad.telegram_id}",
+                          chat=FakeChat(group.telegram_chat_id), bot=bot)
+        await ga.cmd_ban(msg, session=session, group=group, db_user=admin, services=services)
+        assert any("навсегда" in t for t in msg.answers)
+        gp = await services.groups.local_player(group.id, bad.id)
+        assert gp.is_banned and gp.banned_until is None
+        assert any(c["method"] == "ban_chat_member" for c in bot.calls)
+
+        umsg = FakeMessage(FakeTgUser(admin.telegram_id), f"/unban {bad.telegram_id}",
+                           chat=FakeChat(group.telegram_chat_id), bot=bot)
+        await ga.cmd_ban(umsg, session=session, group=group, db_user=admin, services=services)
+        assert any("разбанен" in t for t in umsg.answers)
+        gp = await services.groups.local_player(group.id, bad.id)
+        assert not gp.is_banned
+        unban = [c for c in bot.calls if c["method"] == "unban_chat_member"]
+        assert unban and unban[0]["only_if_banned"] is True
+
+    async def test_hierarchy_mod_cannot_punish_mod_or_admin(self, services, session):
+        mod = await make_user(session, "M1")
+        mod2 = await make_user(session, "M2")
+        admin = await make_user(session, "A")
+        group = await services.groups.get_or_create(-605400, "A")
+        await _set_staff(services.session_factory, group.id, mod.id, 2)
+        await _set_staff(services.session_factory, group.id, mod2.id, 2)
+        await _set_staff(services.session_factory, group.id, admin.id, 3)
+
+        for target, cmd in ((mod2, "/warn"), (admin, "/kick"), (mod2, f"/ban {mod2.telegram_id}")):
+            msg = FakeMessage(FakeTgUser(mod.telegram_id), cmd,
+                              chat=FakeChat(group.telegram_chat_id),
+                              reply=FakeMessage(FakeTgUser(target.telegram_id), "x"),
+                              bot=FakeBot())
+            if cmd == "/warn":
+                await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+            elif cmd == "/kick":
+                await ga.cmd_kick(msg, session=session, group=group, db_user=mod, services=services)
+            else:
+                await ga.cmd_ban(msg, session=session, group=group, db_user=mod, services=services)
+            assert any("выше или равным" in t for t in msg.answers), cmd
+
+        # админ МОЖЕТ карать модератора; нельзя карать себя
+        kmsg = FakeMessage(FakeTgUser(admin.telegram_id), "/kick",
+                           chat=FakeChat(group.telegram_chat_id),
+                           reply=FakeMessage(FakeTgUser(mod.telegram_id), "x"), bot=FakeBot())
+        await ga.cmd_kick(kmsg, session=session, group=group, db_user=admin, services=services)
+        assert any("исключён" in t for t in kmsg.answers)
+
+        smsg = FakeMessage(FakeTgUser(admin.telegram_id), "/warn",
+                           chat=FakeChat(group.telegram_chat_id),
+                           reply=FakeMessage(FakeTgUser(admin.telegram_id), "x"))
+        await ga.cmd_warns(smsg, session=session, group=group, db_user=admin, services=services)
+        assert any("самому себе" in t for t in smsg.answers)
+
+
+class TestWarnV2:
+    """Варн с причиной/сроком; 3/3 -> авто-бан на время; /warnings со списком."""
+
+    async def test_warn_with_reason_and_duration(self, services, session):
+        mod = await make_user(session, "M")
+        noisy = await make_user(session, "N")
+        group = await services.groups.get_or_create(-606000, "A")
+        await _set_staff(services.session_factory, group.id, mod.id, 2)
+
+        msg = FakeMessage(FakeTgUser(mod.telegram_id), f"/warn {noisy.telegram_id} 3d спам в чате",
+                          chat=FakeChat(group.telegram_chat_id), bot=FakeBot())
+        await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+        assert any("1/3" in t and "спам в чате" in t for t in msg.answers)
+        warns = await services.groups.warnings_of(group.id, noisy.id)
+        assert len(warns) == 1 and warns[0].reason == "спам в чате"
+        hours = (warns[0].expires_at - warns[0].created_at).total_seconds() / 3600
+        assert abs(hours - 72) < 0.01  # 3 дня
+
+    async def test_three_warns_auto_ban(self, services, session):
+        mod = await make_user(session, "M")
+        noisy = await make_user(session, "N")
+        group = await services.groups.get_or_create(-606100, "A")
+        await _set_staff(services.session_factory, group.id, mod.id, 2)
+
+        bot = FakeBot()
+        for i in range(3):
+            msg = FakeMessage(FakeTgUser(mod.telegram_id), f"/warn {noisy.telegram_id}",
+                              chat=FakeChat(group.telegram_chat_id), bot=bot)
+            await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+        assert any("3/3" in t and "авто-бан" in t for t in msg.answers)
+        gp = await services.groups.local_player(group.id, noisy.id)
+        assert gp.is_banned and gp.banned_until is not None  # бан на время (24 ч по умолч.)
+        bans = [c for c in bot.calls if c["method"] == "ban_chat_member"]
+        assert bans and bans[0]["until_date"] is not None    # Telegram-бан со сроком
+        assert gp.warnings == 0                              # варны израсходованы
+        assert await services.groups.warnings_of(group.id, noisy.id) == []
+
+    async def test_warnings_lists_active_with_reasons(self, services, session):
+        mod = await make_user(session, "M")
+        noisy = await make_user(session, "N")
+        group = await services.groups.get_or_create(-606200, "A")
+        await _set_staff(services.session_factory, group.id, mod.id, 2)
+
+        await services.groups.warn(group.id, noisy.id, mod.id, reason="флуд")
+        msg = FakeMessage(FakeTgUser(mod.telegram_id), f"/warnings {noisy.telegram_id}",
+                          chat=FakeChat(group.telegram_chat_id))
+        await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+        assert any("1/3" in t and "флуд" in t for t in msg.answers)
+
+    async def test_unwarn_removes_last(self, services, session):
+        mod = await make_user(session, "M")
+        noisy = await make_user(session, "N")
+        group = await services.groups.get_or_create(-606300, "A")
+        await _set_staff(services.session_factory, group.id, mod.id, 2)
+
+        await services.groups.warn(group.id, noisy.id, mod.id, reason="1")
+        await services.groups.warn(group.id, noisy.id, mod.id, reason="2")
+        msg = FakeMessage(FakeTgUser(mod.telegram_id), "/unwarn",
+                          chat=FakeChat(group.telegram_chat_id),
+                          reply=FakeMessage(FakeTgUser(noisy.telegram_id), "x"))
+        await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+        assert any("Активных: 1" in t for t in msg.answers)
+        left = await services.groups.warnings_of(group.id, noisy.id)
+        assert len(left) == 1 and left[0].reason == "1"

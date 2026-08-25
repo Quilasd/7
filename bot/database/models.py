@@ -299,8 +299,9 @@ class GroupPlayer(Base):
     best_win_streak: Mapped[int] = mapped_column(Integer, default=0)
 
     # Модерация внутри группы
-    warnings: Mapped[int] = mapped_column(Integer, default=0)
+    warnings: Mapped[int] = mapped_column(Integer, default=0)  # активные варны (синхронизируется с group_warnings)
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False)
+    banned_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # None = навсегда
 
     joined_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
@@ -351,6 +352,10 @@ class GroupSettingsModel(Base):
     global_rating_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     local_rating_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     debug_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Система варнов: лимит до авто-бана, срок жизни варна (часы), длительность авто-бана (мин)
+    warn_limit: Mapped[int] = mapped_column(Integer, default=3)
+    warn_expire_hours: Mapped[int] = mapped_column(Integer, default=168)      # 7 дней
+    warn_ban_minutes: Mapped[int] = mapped_column(Integer, default=1440)     # 24 часа
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
@@ -373,6 +378,28 @@ class AuditLog(Base):
 
 
 # --- Предсмертные записки, соцсеть, достижения, титулы, ивенты ---------------
+
+
+class GroupWarning(Base):
+    """Варн в группе: с причиной и сроком действия.
+
+    Активные варны (expires_at > now, не отозван) считаются в GroupPlayer.warnings;
+    при достижении лимита (GroupSettings.warn_limit) — авто-бан на время.
+    """
+
+    __tablename__ = "group_warnings"
+    __table_args__ = (
+        Index("ix_group_warnings_group_user", "group_id", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"))
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    actor_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    reason: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)  # срок действия варна
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)  # снят / израсходован авто-баном
 
 
 class DeathNote(Base):

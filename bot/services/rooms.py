@@ -134,6 +134,15 @@ class RoomService:
             if room.player_count() >= room.max_players:
                 return None, "Комната заполнена."
 
+            # локальный бан в группе этой комнаты (лениво снимаем истёкший)
+            if room.group_id:
+                from bot.services.groups import effective_ban
+
+                banned, gp = await effective_ban(session, room.group_id, user_id)
+                if banned:
+                    until = f" до {gp.banned_until:%d.%m.%Y %H:%M}" if gp and gp.banned_until else ""
+                    return None, f"🚫 Ты забанен в этой группе{until}."
+
             session.add(RoomPlayer(room_id=room.id, user_id=user_id, is_ready=False))
             await session.commit()
             logger.info("Комната %s: присоединился игрок %s", room.id, user_id)

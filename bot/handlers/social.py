@@ -224,6 +224,11 @@ async def cmd_invite(message: Message, command: CommandObject, session, services
     if target.is_banned:
         await message.answer("Этот игрок заблокирован и не может участвовать в играх.")
         return
+    if room.group_id:
+        banned, gp_row = await services.groups.effective_ban(session, room.group_id, target.id)
+        if banned:
+            await message.answer("Этот игрок забанен в группе, к которой относится комната.")
+            return
     await services.notifier.send(
         target.telegram_id,
         f"🎮 <b>{esc(display_name(db_user))}</b> приглашает тебя в комнату #{room.id} "
