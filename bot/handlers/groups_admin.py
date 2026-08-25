@@ -141,7 +141,12 @@ async def _moderation_target(message: Message, session, services, group, permiss
     args = message.text.split(maxsplit=1)[1].strip() if len(message.text.split(maxsplit=1)) > 1 else ""
     target = await _resolve_target(message, session, args or None)
     if target is None:
-        await message.answer("🤷 Укажи игрока: ID/@username или ответь на сообщение.")
+        cmd = message.text.split()[0] if message.text else "/команда"
+        await message.answer(
+            "🤷 Укажи игрока: его <b>ID</b>, <b>@username</b> "
+            "или ответь этой командой на его сообщение.\n\n"
+            f"Пример: <code>{cmd} @username</code> — либо ответь на сообщение игрока."
+        )
         return None
     return access, target
 
@@ -154,7 +159,10 @@ async def cmd_warns(message: Message, session, group, db_user, services) -> None
             return
         target = await _resolve_target(message, session, (message.get_args() or "").strip() or None)
         if target is None:
-            await message.answer("🤷 Укажи игрока.")
+            await message.answer(
+                "🤷 Укажи игрока: ID, @username или ответь на сообщение.\n"
+                "Пример: <code>/warnings @username</code>"
+            )
             return
         gp = await services.groups.local_player(group.id, target.id) if group else None
         count = gp.warnings if gp else 0
@@ -343,7 +351,10 @@ async def cmd_game_kill(message: Message, command: CommandObject, session, group
         return
     args = (command.args or "").split()
     if len(args) < 2 or not args[0].isdigit():
-        await message.answer("Формат: /game_kill <game_id> <ID|@username>")
+        await message.answer(
+            f"💡 Формат: <code>/{command.command} &lt;game_id&gt; &lt;ID|@username&gt;</code>\n"
+            f"Пример: <code>/{command.command} 12 @username</code>"
+        )
         return
     game = await GameRepository(session).get(int(args[0]))
     if game is None:
@@ -429,7 +440,16 @@ async def cmd_room_manage(message: Message, command: CommandObject, session, gro
         return
     args = (command.args or "").split()
     if not args or not args[0].isdigit():
-        await message.answer(f"Формат: /{command.command} <room_id> [{'<user>}' if command.command == 'room_kick' else ''}]")
+        if command.command == "room_kick":
+            await message.answer(
+                "💡 Формат: <code>/room_kick &lt;room_id&gt; &lt;ID|@username&gt;</code>\n"
+                "Пример: <code>/room_kick 5 @username</code>"
+            )
+        else:
+            await message.answer(
+                f"💡 Формат: <code>/{command.command} &lt;room_id&gt;</code>\n"
+                f"Пример: <code>/{command.command} 5</code>"
+            )
         return
     rooms_repo = RoomRepository(session)
     room = await rooms_repo.get(int(args[0]))
@@ -448,7 +468,10 @@ async def cmd_room_manage(message: Message, command: CommandObject, session, gro
 
     if command.command == "room_kick":
         if len(args) < 2:
-            await message.answer("Формат: /room_kick <room_id> <ID|@username>")
+            await message.answer(
+                "💡 Формат: <code>/room_kick &lt;room_id&gt; &lt;ID|@username&gt;</code>\n"
+                "Пример: <code>/room_kick 5 @username</code>"
+            )
             return
         target = await UserLookupService(session).resolve(" ".join(args[1:]))
         if target is None:
@@ -555,7 +578,13 @@ async def cmd_staff_add(message: Message, command: CommandObject, session, group
         return
     args = (command.args or "").split()
     if len(args) < 2:
-        await message.answer("Формат: /staff_add <ID|@username> <уровень 1-4>")
+        await message.answer(
+            "👥 <b>Назначение администратора группы</b>\n\n"
+            f"💡 Формат: <code>/{command.command} &lt;ID|@username&gt; &lt;уровень 1-4&gt;</code>\n"
+            f"Пример: <code>/{command.command} @username 3</code>\n\n"
+            "Уровни: 1 🛟 Helper · 2 🔨 Moderator · 3 ⚙️ Admin · 4 🎖 Senior Admin\n"
+            "Игрока можно задать ID, @username или ответом на его сообщение."
+        )
         return
     target = await UserLookupService(session).resolve(args[0])
     if target is None:
@@ -585,7 +614,11 @@ async def cmd_staff_remove(message: Message, command: CommandObject, session, gr
     args = (command.args or "").split()
     target = await _resolve_target(message, session, args[0] if args else None)
     if target is None:
-        await message.answer("Формат: /staff_remove <ID|@username>")
+        await message.answer(
+            f"💡 Формат: <code>/{command.command} &lt;ID|@username&gt;</code>\n"
+            f"Пример: <code>/{command.command} @username</code>\n"
+            "Либо ответь этой командой на сообщение игрока."
+        )
         return
     access = await _access(session, services, message.from_user.id, group)
     ok, result = await services.groups.remove_staff(
@@ -604,7 +637,11 @@ async def cmd_staff_info(message: Message, command: CommandObject, session, grou
     args = (command.args or "").strip()
     target = await _resolve_target(message, session, args or None)
     if target is None:
-        await message.answer("Формат: /staff_info <ID|@username>")
+        await message.answer(
+            "💡 Формат: <code>/staff_info &lt;ID|@username&gt;</code>\n"
+            "Пример: <code>/staff_info @username</code>\n"
+            "Либо ответь этой командой на сообщение игрока."
+        )
         return
     row = await services.groups.get_staff_member(group.id, target.id)
     from bot.services.permissions import LEVEL_TITLES as T
@@ -811,7 +848,13 @@ async def cmd_set_number(message: Message, command: CommandObject, session, grou
         return
     args = (command.args or "").strip()
     if not args.isdigit():
-        await message.answer(f"Формат: /{command.command} <число>")
+        field_name, min_value, max_value = SETTING_COMMANDS[command.command]
+        unit = "сек" if "seconds" in field_name else ""
+        rng = f"{min_value}–{max_value} {unit}".strip()
+        await message.answer(
+            f"💡 Формат: <code>/{command.command} &lt;{rng}&gt;</code>\n"
+            f"Пример: <code>/{command.command} {min_value}</code>"
+        )
         return
     field, min_value, max_value = SETTING_COMMANDS[command.command]
     value = max(min_value, min(max_value, int(args)))
@@ -831,7 +874,12 @@ async def cmd_set_roles(message: Message, command: CommandObject, session, group
         return
     args = (command.args or "").split()
     if len(args) != 2 or not args[1].isdigit():
-        await message.answer("Формат: /set_roles mafia 2  (или maniac on|off)")
+        await message.answer(
+            "💡 Формат:\n"
+            "<code>/set_roles mafia &lt;1-4&gt;</code> — число мафий\n"
+            "<code>/set_roles maniac on|off</code> — маньяк вкл/выкл\n\n"
+            "Пример: <code>/set_roles mafia 2</code> · <code>/set_roles maniac off</code>"
+        )
         return
     field, raw = args[0].lower(), args[1]
     if field == "mafia":

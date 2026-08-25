@@ -373,6 +373,85 @@ class TestClaimCommand:
         assert ok is False and result == "уже есть права"
 
 
+class TestUsageHints:
+    """Пустые команды (без аргументов) должны показывать пример использования."""
+
+    async def _boss_group(self, services, session, tag):
+        boss = await make_user(session, "Boss" + tag)
+        group = await services.groups.get_or_create(-(604000 + int(tag)), "A")
+        await _set_staff(services.session_factory, group.id, boss.id, 4)
+        return boss, group
+
+    async def test_staff_add_empty_shows_example(self, services, session):
+        boss, group = await self._boss_group(services, session, "1")
+        msg = FakeMessage(FakeTgUser(boss.telegram_id), "/staff_add",
+                          chat=FakeChat(group.telegram_chat_id))
+        await ga.cmd_staff_add(msg, FakeCommandObject(None, "staff_add"), session=session,
+                               group=group, services=services, db_user=boss)
+        joined = "\n".join(msg.answers)
+        assert "Формат" in joined and "Пример" in joined
+        assert "staff_add" in joined and "@username" in joined
+        assert "Senior Admin" in joined  # легенда уровней
+
+    async def test_staff_remove_empty_shows_example(self, services, session):
+        boss, group = await self._boss_group(services, session, "2")
+        msg = FakeMessage(FakeTgUser(boss.telegram_id), "/staff_remove",
+                          chat=FakeChat(group.telegram_chat_id))
+        await ga.cmd_staff_remove(msg, FakeCommandObject(None, "staff_remove"), session=session,
+                                  group=group, services=services, db_user=boss)
+        joined = "\n".join(msg.answers)
+        assert "Формат" in joined and "Пример" in joined
+        assert "staff_remove" in joined
+
+    async def test_staff_info_empty_shows_example(self, services, session):
+        boss, group = await self._boss_group(services, session, "3")
+        msg = FakeMessage(FakeTgUser(boss.telegram_id), "/staff_info",
+                          chat=FakeChat(group.telegram_chat_id))
+        await ga.cmd_staff_info(msg, FakeCommandObject(None, "staff_info"), session=session,
+                                group=group, services=services)
+        joined = "\n".join(msg.answers)
+        assert "Формат" in joined and "Пример" in joined
+        assert "staff_info" in joined
+
+    async def test_set_night_time_empty_shows_range_and_example(self, services, session):
+        boss, group = await self._boss_group(services, session, "4")
+        msg = FakeMessage(FakeTgUser(boss.telegram_id), "/set_night_time abc",
+                          chat=FakeChat(group.telegram_chat_id))
+        await ga.cmd_set_number(msg, FakeCommandObject("abc", "set_night_time"), session=session,
+                                group=group, services=services, db_user=boss)
+        joined = "\n".join(msg.answers)
+        assert "Формат" in joined and "Пример" in joined
+        assert "30" in joined and "600" in joined  # диапазон
+
+    async def test_set_roles_empty_shows_example(self, services, session):
+        boss, group = await self._boss_group(services, session, "5")
+        msg = FakeMessage(FakeTgUser(boss.telegram_id), "/set_roles",
+                          chat=FakeChat(group.telegram_chat_id))
+        await ga.cmd_set_roles(msg, FakeCommandObject(None, "set_roles"), session=session,
+                               group=group, services=services, db_user=boss)
+        joined = "\n".join(msg.answers)
+        assert "Формат" in joined and "Пример" in joined
+        assert "mafia" in joined and "maniac" in joined
+
+    async def test_warn_empty_shows_example(self, services, session):
+        mod, group = await self._boss_group(services, session, "6")
+        msg = FakeMessage(FakeTgUser(mod.telegram_id), "/warn",
+                          chat=FakeChat(group.telegram_chat_id))
+        await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+        joined = "\n".join(msg.answers)
+        assert "Пример" in joined and "@username" in joined
+
+    async def test_room_kick_empty_shows_example(self, services, session):
+        boss, group = await self._boss_group(services, session, "7")
+        msg = FakeMessage(FakeTgUser(boss.telegram_id), "/room_kick",
+                          chat=FakeChat(group.telegram_chat_id))
+        await ga.cmd_room_manage(msg, FakeCommandObject(None, "room_kick"), session=session,
+                                 group=group, services=services, db_user=boss)
+        joined = "\n".join(msg.answers)
+        assert "Формат" in joined and "Пример" in joined
+        assert "room_kick" in joined
+
+
 class TestSystemCommands:
     async def test_debug_help_owner_only(self, services, session, monkeypatch):
         owner = await make_user(session, "Owner")
