@@ -548,6 +548,13 @@ async def cmd_claim(message: Message, session, group, services, db_user) -> None
         return
     ok, result = await services.groups.claim_creator(group.id, db_user.id)
     await message.answer(("✅ " if ok else "") + esc(result))
+    if ok:
+        # показать создателю админ-команды группы в меню «/» (scope ChatMember)
+        from bot.utils.commands_menu import set_member_commands
+
+        await set_member_commands(
+            message.bot, group.telegram_chat_id, message.from_user.id, is_group_admin=True
+        )
 
 
 @router.message(Command("staff"))

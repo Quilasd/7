@@ -4,7 +4,10 @@ set_my_commands с разными scope:
 - BotCommandScopeDefault       — базовый список для всех;
 - BotCommandScopeAllGroupChats — короткий список для групп;
 - BotCommandScopeChat(chat_id=админ) — расширенный список лично для
-  глобальной администрации из .env (OWNER_IDS + ADMIN_IDS).
+  глобальной администрации из .env (OWNER_IDS + ADMIN_IDS);
+- BotCommandScopeChatMember(chat_id, user_id) — персональный список для
+  КОНКРЕТНОГО участника группы (локальному админу после /claim показываем
+  админ-команды этой группы; в группе иначе виден только общий group-scope).
 
 ВАЖНО: подсказки — это только UX. Скрытие команды из меню НЕ является
 защитой: все права по-прежнему проверяются на сервере через
@@ -25,6 +28,7 @@ from aiogram.types import (
     BotCommand,
     BotCommandScopeAllGroupChats,
     BotCommandScopeChat,
+    BotCommandScopeChatMember,
     BotCommandScopeDefault,
 )
 
@@ -51,7 +55,22 @@ GROUP_COMMANDS: list[BotCommand] = [
     BotCommand(command="top", description="🏆 Рейтинг этой группы"),
     BotCommand(command="stats", description="📊 Моя статистика"),
     BotCommand(command="group_stats", description="🏠 Статистика группы"),
+    BotCommand(command="claim", description="👑 Создателю: забрать права админа"),
     BotCommand(command="cancel", description="❌ Отмена"),
+]
+
+#: Доп. команды управления группой — показываются ЛОКАЛЬНОМУ админу группы
+#: (получившему уровень через /claim или /staff_add) через scope ChatMember.
+GROUP_ADMIN_COMMANDS: list[BotCommand] = [
+    BotCommand(command="settings", description="⚙️ Настройки группы"),
+    BotCommand(command="staff", description="👥 Штаб группы"),
+    BotCommand(command="staff_add", description="➕ Назначить админа: ID 3"),
+    BotCommand(command="staff_remove", description="➖ Снять админа"),
+    BotCommand(command="staff_info", description="ℹ️ Уровень игрока"),
+    BotCommand(command="players", description="👥 Игроки группы"),
+    BotCommand(command="createroom", description="➕ Комната с правилами группы"),
+    BotCommand(command="room_force_start", description="▶️ Старт комнаты по ID"),
+    BotCommand(command="game_stop", description="🛑 Остановить игру"),
 ]
 
 #: Админские команды (глобальная администрация: OWNER_IDS + ADMIN_IDS)
@@ -60,16 +79,26 @@ ADMIN_COMMANDS: list[BotCommand] = [
     BotCommand(command="player", description="👤 Профиль игрока (ID/@username/reply)"),
     BotCommand(command="players", description="👥 Игроки группы"),
     BotCommand(command="warn", description="⚠️ Выдать предупреждение (reply/ID)"),
+    BotCommand(command="unwarn", description="✅ Снять предупреждение"),
+    BotCommand(command="warnings", description="⚠️ Число предупреждений игрока"),
     BotCommand(command="mute", description="🔇 Мут: /mute 60 (reply/ID)"),
+    BotCommand(command="unmute", description="🔊 Снять мут"),
     BotCommand(command="kick", description="👢 Кикнуть из группы"),
     BotCommand(command="ban", description="🚫 Забанить (глобально/локально)"),
+    BotCommand(command="unban", description="✅ Разбанить"),
     BotCommand(command="game", description="🎮 Активная игра группы"),
     BotCommand(command="games", description="🎮 Список игр группы"),
+    BotCommand(command="game_stop", description="🛑 Остановить игру по ID"),
     BotCommand(command="rooms", description="🏠 Комнаты группы"),
     BotCommand(command="createroom", description="➕ Комната с правилами группы"),
+    BotCommand(command="room_force_start", description="▶️ Старт комнаты по ID"),
     BotCommand(command="staff", description="👥 Штаб группы"),
     BotCommand(command="staff_add", description="➕ Назначить админа: /staff_add ID 3"),
+    BotCommand(command="staff_remove", description="➖ Снять админа"),
+    BotCommand(command="staff_info", description="ℹ️ Уровень игрока"),
     BotCommand(command="settings", description="⚙️ Настройки группы"),
+    BotCommand(command="set_roles", description="🎭 Роли: /set_roles mafia 2"),
+    BotCommand(command="claim", description="👑 Создателю: забрать права админа"),
     BotCommand(command="broadcast", description="📣 Рассылка"),
     BotCommand(command="botstats", description="📊 Статистика бота"),
     BotCommand(command="logs", description="📜 Логи"),
@@ -149,3 +178,25 @@ async def refresh_user_commands(bot: Bot, telegram_id: int, is_admin: bool, is_o
         )
     except TelegramAPIError as exc:  # pragma: no cover
         logger.warning("Подсказки для %s не обновлены: %s", telegram_id, exc)
+
+
+async def set_member_commands(
+    bot: Bot, chat_id: int, user_id: int, is_group_admin: bool
+) -> None:
+    """Команды конкретного участника в группе (scope ChatMember).
+
+    В группе Telegram показывает всем общий group-scope; чтобы локальный
+    админ (получивший уровень через /claim или /staff_add) увидел админ-
+    команды, выставляем ему персональный набор через BotCommandScopeChatMember.
+    Срабатывает только для этого пользователя в этом чате.
+    """
+    commands = GROUP_COMMANDS + GROUP_ADMIN_COMMANDS if is_group_admin else GROUP_COMMANDS
+    try:
+        await bot.set_my_commands(
+            commands,
+            scope=BotCommandScopeChatMember(chat_id=chat_id, user_id=user_id),
+        )
+    except TelegramAPIError as exc:  # pragma: no cover
+        logger.warning(
+            "Подсказки участника %s в %s не установлены: %s", user_id, chat_id, exc
+        )

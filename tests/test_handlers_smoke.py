@@ -58,6 +58,11 @@ class FakeBot:
             raise TelegramAPIError(method="getChatMember", message="forbidden")
         return SimpleNamespace(status=self.member_status)
 
+    async def set_my_commands(self, commands, scope=None) -> bool:
+        """Регистрация меню «/» — записываем вызов для проверок в тестах."""
+        self.calls.append({"method": "set_my_commands", "commands": commands, "scope": scope})
+        return True
+
 
 class FakeMessage:
     def __init__(self, user: FakeTgUser, text: str, chat: FakeChat | None = None,
@@ -340,6 +345,11 @@ class TestClaimCommand:
         assert entry.actor_id == creator.id
         assert entry.target_id == creator.id
         assert "was 0" in entry.details
+        # создателю зарегистрировано админ-меню группы (scope ChatMember)
+        menu_calls = [c for c in bot.calls if c.get("method") == "set_my_commands"]
+        assert menu_calls, "set_my_commands должен вызываться после /claim"
+        cmd_names = [c.command for c in menu_calls[-1]["commands"]]
+        assert "settings" in cmd_names and "staff_add" in cmd_names
 
     async def test_claim_non_creator_denied(self, services, session):
         member = await make_user(session, "Member")
@@ -371,6 +381,50 @@ class TestClaimCommand:
         # прямой вызов сервиса на уже-Senior — тоже no-op, без ошибки
         ok, result = await services.groups.claim_creator(group.id, senior.id)
         assert ok is False and result == "уже есть права"
+
+
+class TestCommandsMenu:
+    async def test_set_member_admin_commands(self):
+        import bot.utils.commands_menu as menu
+
+        class B:
+            def __init__(self):
+                self.last = None
+
+            async def set_my_commands(self, commands, scope=None):
+                self.last = (commands, scope)
+
+        bot = B()
+        await menu.set_member_commands(bot, chat_id=-100, user_id=42, is_group_admin=True)
+        commands, scope = bot.last
+        names = [c.command for c in commands]
+        # базовые групповые + админские команды группы
+        assert "claim" in names and "settings" in names and "staff_add" in names
+        assert scope is not None  # scope передан (ChatMember)
+
+    async def test_set_member_non_admin_is_base_only(self):
+        import bot.utils.commands_menu as menu
+
+        class B:
+            def __init__(self):
+                self.last = None
+
+            async def set_my_commands(self, commands, scope=None):
+                self.last = (commands, scope)
+
+        bot = B()
+        await menu.set_member_commands(bot, chat_id=-100, user_id=42, is_group_admin=False)
+        names = [c.command for c in bot.last[0]]
+        assert "settings" not in names and "staff_add" not in names
+        assert "top" in names and "claim" in names  # базовый набор группы
+
+    def test_admin_commands_includes_claim_and_staff(self):
+        import bot.utils.commands_menu as menu
+
+        names = {c.command for c in menu.ADMIN_COMMANDS}
+        for required in ("claim", "staff_add", "staff_remove", "staff_info",
+                         "unmute", "unban", "set_roles", "game_stop"):
+            assert required in names, required
 
 
 class TestUsageHints:
