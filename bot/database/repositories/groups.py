@@ -111,6 +111,23 @@ class GroupPlayerRepository(BaseRepository[GroupPlayer]):
         )
         return list(result.scalars().unique().all())
 
+    async def rank_in_group(self, group_id: int, metric: str, value: int, secondary: int = 0) -> int:
+        """Позиция в локальном топе группы по метрике (rating|wins|level).
+
+        secondary — XP для тай-брейка при metric='level'.
+        """
+        col = self._METRIC_COLUMNS.get(metric, GroupPlayer.rating)
+        if metric == "level":
+            cond = (col > value) | ((col == value) & (GroupPlayer.xp > secondary))
+        else:
+            cond = col > value
+        result = await self.session.execute(
+            select(func.count()).select_from(GroupPlayer).where(
+                GroupPlayer.group_id == group_id, GroupPlayer.is_banned.is_(False), cond
+            )
+        )
+        return int(result.scalar_one()) + 1
+
 
 class GroupAdminRepository(BaseRepository[GroupAdmin]):
     model = GroupAdmin

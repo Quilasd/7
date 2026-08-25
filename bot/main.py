@@ -28,6 +28,8 @@ from bot.middlewares import (
 )
 from bot.services.app_config import AppConfigService
 from bot.services.audit import AuditService
+from bot.services.rewards import RewardService
+from bot.services.social import SocialService
 from bot.services.game_manager import GameManager
 from bot.services.groups import GroupService
 from bot.services.permissions import PermissionService
@@ -47,7 +49,8 @@ class Services:
     """DI-контейнер: доступен хендлерам через data['services']."""
 
     def __init__(self, session_factory, notifier, timers, phases, games, rooms, app_config,
-                 test_games, settings, permissions, groups, audit, rating, maintenance):
+                 test_games, settings, permissions, groups, audit, rating, maintenance,
+                 social, rewards):
         self.session_factory = session_factory
         self.notifier = notifier
         self.timers = timers
@@ -62,6 +65,8 @@ class Services:
         self.audit = audit
         self.rating = rating
         self.maintenance = maintenance
+        self.social = social
+        self.rewards = rewards
 
 
 def build_services(bot: Bot, settings) -> tuple[Services, TimerManager]:
@@ -89,9 +94,11 @@ def build_services(bot: Bot, settings) -> tuple[Services, TimerManager]:
     audit = AuditService(session_factory)
     test_games = TestGameManager(session_factory, games, phases, notifier, groups=groups_service)
     maintenance = MaintenanceMiddleware(session_factory)
+    social = SocialService(session_factory)
+    rewards = RewardService(session_factory)
     services = Services(
         session_factory, notifier, timers, phases, games, rooms, app_config, test_games,
-        settings, permissions, groups_service, audit, rating, maintenance,
+        settings, permissions, groups_service, audit, rating, maintenance, social, rewards,
     )
     services.engine = engine  # для корректного dispose при остановке
     return services, timers

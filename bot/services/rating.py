@@ -152,8 +152,15 @@ class RatingService:
             if not is_draw:
                 if won:
                     row.wins += 1
+                    # 🔥 серия побед: победа продлевает, лучшая фиксируется
+                    row.win_streak = int(getattr(row, "win_streak", 0) or 0) + 1
+                    row.best_win_streak = max(
+                        int(getattr(row, "best_win_streak", 0) or 0), row.win_streak
+                    )
                 else:
                     row.losses += 1
+                    # поражение сбрасывает текущую серию (лучшая остаётся)
+                    row.win_streak = 0
             if scope.rating:
                 row.rating = max(0, row.rating + rating_delta)
             if scope.xp:

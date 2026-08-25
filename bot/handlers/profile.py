@@ -20,29 +20,52 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
-def profile_text(user, header: bool = True, progression=None) -> str:
-    """Глобальный блок профиля (статистика User, не зависит от групп)."""
+def profile_text(user, header: bool = True, progression=None, ranks=None, extras=None) -> str:
+    """Глобальный блок профиля (статистика User, не зависит от групп).
+
+    ranks: {'rating': int, 'wins': int, 'level': int} — позиции в рейтинге.
+    extras: {'title': str, 'event_reward': str, 'achievements': 'X/Y',
+             'win_streak': int, 'best_win_streak': int} — доп. блоки.
+    """
     from bot.services.progression import DEFAULT_PROGRESSION
 
     progression = progression or DEFAULT_PROGRESSION
+    ranks = ranks or {}
+    extras = extras or {}
     total = user.wins + user.losses
     winrate = (user.wins / total * 100) if total else 0.0
     _, in_level, need = progression.xp_progress_in_level(user.xp)
-    lines = [
-        "🌐 <b>ГЛОБАЛЬНО</b>",
+
+    def _rank(key: str) -> str:
+        pos = ranks.get(key)
+        return f" (#{pos})" if pos else ""
+
+    lines = ["🌐 <b>ГЛОБАЛЬНО</b>", ""]
+    # компактный рейтинг-блок + серия побед
+    lines.append(
+        f"⭐ Рейтинг: <b>{user.rating}</b>{_rank('rating')}  ·  "
+        f"🏆 Побед: <b>{user.wins}</b>{_rank('wins')}  ·  "
+        f"📈 Уровень: <b>{user.level}</b>{_rank('level')}"
+    )
+    streak = extras.get("win_streak", 0)
+    best = extras.get("best_win_streak", 0)
+    lines.append(f"🔥 Серия побед: <b>{streak}</b> / 🏆 Лучшая серия: <b>{best}</b>")
+    badge_lines = []
+    if extras.get("title"):
+        badge_lines.append(f"🎓 Титул: {extras['title']}")
+    if extras.get("event_reward"):
+        badge_lines.append(f"🎪 Награда: {extras['event_reward']}")
+    if extras.get("achievements"):
+        badge_lines.append(f"🏅 Достижения: {extras['achievements']}")
+    if badge_lines:
+        lines.append("\n".join(badge_lines))
+    lines += [
         "",
-        f"⭐ Рейтинг: <b>{user.rating}</b>",
-        f"🎖 Уровень: <b>{user.level}</b>",
         f"✨ XP: <b>{user.xp}</b> (до следующего уровня {in_level}/{need})",
-        f"🏆 Побед: <b>{user.wins}</b>",
-        f"💀 Поражений: <b>{user.losses}</b>",
-        f"🎮 Игр: <b>{user.games_played}</b>",
-        f"📈 Winrate: <b>{winrate:.0f}%</b>",
+        f"💀 Поражений: <b>{user.losses}</b>  ·  🎮 Игр: <b>{user.games_played}</b>  ·  📈 Winrate: <b>{winrate:.0f}%</b>",
         "",
-        f"☠️ Убийств: <b>{user.kills}</b>",
-        f"❤️ Спасений: <b>{user.saves}</b>",
-        f"🕵️ Расследований: <b>{user.investigations}</b>",
-        f"🗳 Правильных голосований: <b>{user.correct_votes}</b>",
+        f"☠️ Убийств: <b>{user.kills}</b>  ·  ❤️ Спасений: <b>{user.saves}</b>",
+        f"🕵️ Расследований: <b>{user.investigations}</b>  ·  🗳 Верный голос: <b>{user.correct_votes}</b>",
     ]
     if header:
         head = [
@@ -63,19 +86,41 @@ def profile_group_block(group, group_player, progression=None) -> str:
     total = gp.wins + gp.losses
     winrate = (gp.wins / total * 100) if total else 0.0
     _, in_level, need = progression.xp_progress_in_level(gp.xp)
+    streak = getattr(gp, "win_streak", 0) or 0
+    best = getattr(gp, "best_win_streak", 0) or 0
     return "\n".join([
         f"🏠 <b>ЭТА ГРУППА</b>\n<i>{esc(group.title or '')}</i>\n",
-        f"⭐ Рейтинг: <b>{gp.rating}</b>",
-        f"🎖 Уровень: <b>{gp.level}</b>",
+        f"⭐ Рейтинг: <b>{gp.rating}</b>  ·  🏆 Побед: <b>{gp.wins}</b>  ·  📈 Уровень: <b>{gp.level}</b>",
+        f"🔥 Серия: <b>{streak}</b> / 🏆 Лучшая: <b>{best}</b>",
         f"✨ XP: <b>{gp.xp}</b> (до следующего уровня {in_level}/{need})",
-        f"🏆 Побед: <b>{gp.wins}</b>",
-        f"💀 Поражений: <b>{gp.losses}</b>",
-        f"🎮 Игр: <b>{gp.games_played}</b>",
-        f"📈 Winrate: <b>{winrate:.0f}%</b>",
+        f"💀 Поражений: <b>{gp.losses}</b>  ·  🎮 Игр: <b>{gp.games_played}</b>  ·  📈 Winrate: <b>{winrate:.0f}%</b>",
         "",
-        f"☠️ Убийств: <b>{gp.kills}</b> · ❤️ Спасений: <b>{gp.saves}</b>",
-        f"🕵️ Расследований: <b>{gp.investigations}</b> · 🗳 Верный голос: <b>{gp.correct_votes}</b>",
+        f"☠️ Убийств: <b>{gp.kills}</b>  ·  ❤️ Спасений: <b>{gp.saves}</b>",
+        f"🕵️ Расследований: <b>{gp.investigations}</b>  ·  🗳 Верный голос: <b>{gp.correct_votes}</b>",
     ])
+
+
+async def compute_profile_extras(session, user, services) -> dict:
+    """Ранги (глобальные) + титул/награда/достижения/серия для блока профиля."""
+    from bot.database.repositories.social import UserAchievementRepository
+    from bot.database.repositories.users import UserRepository
+    from bot.services import achievements as ach, titles as ttl
+
+    users = UserRepository(session)
+    ranks = {
+        "rating": await users.rank_by_rating(user.rating),
+        "wins": await users.rank_by_wins(user.wins),
+        "level": await users.rank_by_level(user.level, user.xp),
+    }
+    count = await UserAchievementRepository(session).count(user.id)
+    extras = {
+        "title": ttl.title_display(user.active_title),
+        "event_reward": await services.rewards.active_display(session, user),
+        "achievements": f"{count}/{ach.total_achievements()}",
+        "win_streak": int(getattr(user, "win_streak", 0) or 0),
+        "best_win_streak": int(getattr(user, "best_win_streak", 0) or 0),
+    }
+    return {"ranks": ranks, "extras": extras}
 
 
 def profile_kb() -> InlineKeyboardMarkup:
@@ -90,8 +135,11 @@ def profile_kb() -> InlineKeyboardMarkup:
 
 
 @router.message(Command("profile"))
-async def cmd_profile(message: Message, db_user) -> None:
-    await message.answer(profile_text(db_user), reply_markup=profile_kb())
+async def cmd_profile(message: Message, session, services, db_user) -> None:
+    data = await compute_profile_extras(session, db_user, services)
+    await message.answer(
+        profile_text(db_user, ranks=data["ranks"], extras=data["extras"]), reply_markup=profile_kb()
+    )
 
 
 @router.callback_query(MenuCB.filter(F.action == "profile"))
@@ -99,7 +147,8 @@ async def cb_profile(callback: CallbackQuery, session, db_user, group) -> None:
     from bot.database.repositories.groups import GroupPlayerRepository
 
     await callback.answer()
-    text = profile_text(db_user)
+    data = await compute_profile_extras(session, db_user, services)
+    text = profile_text(db_user, ranks=data["ranks"], extras=data["extras"])
     if group is not None:
         gp = await GroupPlayerRepository(session).get_membership(group.id, db_user.id)
         if gp:
@@ -111,9 +160,12 @@ async def cb_profile(callback: CallbackQuery, session, db_user, group) -> None:
 
 @router.callback_query(MenuCB.filter(F.action == "settings"))
 @router.callback_query(ProfileCB.filter(F.action == "back"))
-async def cb_settings(callback: CallbackQuery, db_user) -> None:
+async def cb_settings(callback: CallbackQuery, session, services, db_user) -> None:
     await callback.answer()
-    await edit_or_answer(callback, profile_text(db_user), profile_kb())
+    data = await compute_profile_extras(session, db_user, services)
+    await edit_or_answer(
+        callback, profile_text(db_user, ranks=data["ranks"], extras=data["extras"]), profile_kb()
+    )
 
 
 @router.callback_query(ProfileCB.filter(F.action == "name"))

@@ -107,3 +107,18 @@ class SettingCB(CallbackData, prefix="gset"):
 
     action: str  # menu | players | timers | roles | voting | progression | extra | set
     value: str = ""
+
+
+class HistoryCB(CallbackData, prefix="hist"):
+    """История игр: пагинация + детальный просмотр."""
+
+    action: str   # page | detail
+    page: int = 0
+    game_id: int = 0
+
+
+class SocialCB(CallbackData, prefix="soc"):
+    """Социальные действия: друзья/запросы/избранные/награды."""
+
+    action: str   # friends | requests | favorites | ignored | rewards | accept | decline | ...
+    value: str = ""

@@ -115,15 +115,25 @@ class GamePlayerRepository(BaseRepository[GamePlayer]):
         )
         return result.scalars().unique().one_or_none()
 
-    async def history_for_user(self, user_id: int, limit: int = 10) -> list[GamePlayer]:
+    async def history_for_user(self, user_id: int, limit: int = 10, offset: int = 0) -> list[GamePlayer]:
         result = await self.session.execute(
             select(GamePlayer)
             .join(Game, Game.id == GamePlayer.game_id)
             .where(GamePlayer.user_id == user_id, Game.status == GameStatus.ENDED.value)
             .order_by(Game.ended_at.desc())
+            .offset(offset)
             .limit(limit)
         )
         return list(result.scalars().unique().all())
+
+    async def history_count(self, user_id: int) -> int:
+        result = await self.session.execute(
+            select(func.count())
+            .select_from(GamePlayer)
+            .join(Game, Game.id == GamePlayer.game_id)
+            .where(GamePlayer.user_id == user_id, Game.status == GameStatus.ENDED.value)
+        )
+        return int(result.scalar_one())
 
     async def by_role(self, game_id: int, role_id: str) -> list[GamePlayer]:
         result = await self.session.execute(

@@ -309,6 +309,8 @@ class GameManager:
                     await self.notifier.send(
                         gp.user.telegram_id, game_view.death_personal_text(gp, "left")
                     )
+                # предложить предсмертную записку (опубликуется следующим утром или в конце игры)
+                await self.phases._record_death_note(session, game, gp)
                 logger.info("Игра %s: игрок %s покинул игру", game.id, user_id)
                 return ActionResult(True, "Ты покинул игру. Спасибо за партию!")
 

@@ -29,3 +29,13 @@ class AdminStates(StatesGroup):
     unban_input = State()
     broadcast_input = State()
     param_input = State()
+
+
+class NoteStates(StatesGroup):
+    """Предсмертная записка: ожидание текста от умершего игрока."""
+    text = State()
+
+
+class SocialStates(StatesGroup):
+    """Ввод цели для социальных команд (если аргумент не передан сразу)."""
+    target = State()

@@ -139,6 +139,14 @@ def death_personal_text(game_player: GamePlayer, cause: str) -> str:
     )
 
 
+def death_note_text(victim: GamePlayer | None, text: str | None) -> str:
+    """Утренняя публикация предсмертной записки (или нейтральное сообщение)."""
+    name = esc(display_name(victim.user)) if victim else "Игрок"
+    if not text:
+        return f"☠️ <b>{name}</b> ничего не успел сказать..."
+    return f"📝 Последние слова <b>{name}</b>:\n\n«{esc(text)}»"
+
+
 def day_text(game: Game, players: list[GamePlayer], seconds: int) -> str:
     return "\n".join(
         [

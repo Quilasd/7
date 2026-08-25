@@ -380,3 +380,203 @@ class TestRecovery:
         )
         count = await fresh_phases.recover()
         assert count == 1
+
+
+class TestDeathNote:
+    """Предсмертная записка: создание, неизменяемость, публикация утром."""
+
+    async def test_death_note_created_and_immutable(self, services, session, notifier):
+        from bot.database.repositories.social import DeathNoteRepository
+
+        users = [await make_user(session, f"P{i}") for i in range(1, 7)]
+        game_id = await _start_game(
+            services, session, users, roles_setup={"mafia": 1, "detective": 1, "doctor": 1}
+        )
+        roles = await _roles_map(services, game_id)
+        mafia_uid = next(uid for uid, r in roles.items() if r == "mafia")
+        victim_uid = next(uid for uid, r in roles.items() if r == "citizen")
+
+        await services.phases.begin_game(game_id)
+        await services.games.submit_night_action(game_id, mafia_uid, "kill", victim_uid)
+        await services.phases.end_night(game_id)  # жертва гибнет ночью
+
+        async with services.session_factory() as s:
+            note = await DeathNoteRepository(s).get(game_id, victim_uid)
+            assert note is not None
+            assert note.text is None          # placeholder, ещё не написана
+            assert note.published is False
+
+        # первая записка сохраняется
+        async with services.session_factory() as s:
+            saved = await DeathNoteRepository(s).set_text(game_id, victim_uid, "Это была мафия!")
+            await s.commit()
+            assert saved is not None and saved.text == "Это была мафия!"
+
+        # повторно изменить нельзя (неизменяемо)
+        async with services.session_factory() as s:
+            second = await DeathNoteRepository(s).set_text(game_id, victim_uid, "другой текст")
+            assert second is None
+
+    async def test_too_long_note_rejected(self, services, session):
+        from bot.database.repositories.social import DeathNoteRepository
+
+        users = [await make_user(session, f"P{i}") for i in range(1, 7)]
+        game_id = await _start_game(
+            services, session, users, roles_setup={"mafia": 1, "detective": 1, "doctor": 1}
+        )
+        roles = await _roles_map(services, game_id)
+        mafia_uid = next(uid for uid, r in roles.items() if r == "mafia")
+        victim_uid = next(uid for uid, r in roles.items() if r == "citizen")
+        await services.phases.begin_game(game_id)
+        await services.games.submit_night_action(game_id, mafia_uid, "kill", victim_uid)
+        await services.phases.end_night(game_id)
+
+        # длина > 300 → заголовком rejects на уровне хендлера; репо хранит как есть,
+        # но лимит 300 соблюдается бизнес-логикой хендлера (DEATH_NOTE_MAX).
+        text = "А" * 300
+        async with services.session_factory() as s:
+            saved = await DeathNoteRepository(s).set_text(game_id, victim_uid, text)
+            await s.commit()
+            assert saved is not None
+            assert len(saved.text) == 300
+
+    async def test_note_published_next_morning(self, services, session, notifier):
+        from bot.database.repositories.social import DeathNoteRepository
+
+        users = [await make_user(session, f"P{i}") for i in range(1, 7)]
+        game_id = await _start_game(
+            services, session, users, roles_setup={"mafia": 1, "detective": 1, "doctor": 1}
+        )
+        roles = await _roles_map(services, game_id)
+        mafia_uid = next(uid for uid, r in roles.items() if r == "mafia")
+        citizens = [uid for uid, r in roles.items() if r == "citizen"]
+        victim_uid, lynch_uid = citizens[0], citizens[1]
+
+        # --- Ночь 1: гибель жертвы, записка записана (death_day=1)
+        await services.phases.begin_game(game_id)
+        await services.games.submit_night_action(game_id, mafia_uid, "kill", victim_uid)
+        await services.phases.end_night(game_id)
+        async with services.session_factory() as s:
+            await DeathNoteRepository(s).set_text(game_id, victim_uid, "Запомните: это мафия!")
+            await s.commit()
+
+        # --- День 1: город линчует другого гражданина (игра продолжается)
+        await services.phases.begin_voting(game_id)
+        alive_city = [
+            uid for uid, r in roles.items()
+            if uid not in (victim_uid,) and r != "mafia"
+        ]
+        for uid in alive_city:
+            await services.games.cast_vote(game_id, uid, lynch_uid)
+        await services.phases.end_voting(game_id)  # линчеван → ночь 2 (без победы)
+
+        # записка ещё не опубликована (утро дня 1 уже прошло, она опубликуется утром дня 2)
+        async with services.session_factory() as s:
+            note = await DeathNoteRepository(s).get(game_id, victim_uid)
+            assert note.published is False
+
+        # --- Ночь 2 → утро дня 2: записка публикуется
+        await services.phases.end_night(game_id)
+        async with services.session_factory() as s:
+            note = await DeathNoteRepository(s).get(game_id, victim_uid)
+            assert note.published is True
+        assert any("Запомните: это мафия!" in text for _, text, _ in notifier.sent)
+
+    async def test_empty_note_neutral_message(self, services, session, notifier):
+        from bot.database.repositories.social import DeathNoteRepository
+
+        users = [await make_user(session, f"P{i}") for i in range(1, 7)]
+        game_id = await _start_game(
+            services, session, users, roles_setup={"mafia": 1, "detective": 1, "doctor": 1}
+        )
+        roles = await _roles_map(services, game_id)
+        mafia_uid = next(uid for uid, r in roles.items() if r == "mafia")
+        victim_uid = next(uid for uid, r in roles.items() if r == "citizen")
+
+        await services.phases.begin_game(game_id)
+        await services.games.submit_night_action(game_id, mafia_uid, "kill", victim_uid)
+        await services.phases.end_night(game_id)
+        # жертва ничего не написала → пустая записка (нейтральное сообщение)
+        async with services.session_factory() as s:
+            await DeathNoteRepository(s).set_text(game_id, victim_uid, "")
+            await s.commit()
+        # игра завершается → unpublished-loop публикует нейтральную записку
+        await services.phases.force_end(game_id, "тест")
+        assert any("ничего не успел сказать" in text for _, text, _ in notifier.sent)
+
+
+class TestWinStreak:
+    """Серия побед: +1 при победе, 0 при поражении, лучшая серия растёт."""
+
+    async def test_streak_on_win_and_loss(self, services, session):
+        users = [await make_user(session, f"P{i}") for i in range(1, 7)]
+        game_id = await _start_game(
+            services, session, users, roles_setup={"mafia": 1, "detective": 1, "doctor": 1}
+        )
+        roles = await _roles_map(services, game_id)
+        mafia_uid = next(uid for uid, r in roles.items() if r == "mafia")
+        citizen_uid = next(uid for uid, r in roles.items() if r == "citizen")
+
+        await services.phases.begin_game(game_id)
+        await services.games.submit_night_action(game_id, mafia_uid, "kill", citizen_uid)
+        await services.phases.end_night(game_id)
+        await services.phases.begin_voting(game_id)
+        alive_city = [uid for uid, r in roles.items() if r != "mafia" and uid != citizen_uid]
+        for uid in alive_city:
+            await services.games.cast_vote(game_id, uid, mafia_uid)
+        await services.phases.end_voting(game_id)  # победа города
+
+        async with services.session_factory() as s:
+            winner = await UserRepository(s).get_by_id(citizen_uid)
+            loser = await UserRepository(s).get_by_id(mafia_uid)
+            assert winner.win_streak == 1
+            assert winner.best_win_streak == 1
+            assert loser.win_streak == 0
+            assert loser.best_win_streak == 0
+
+
+class TestAchievementsAndTitles:
+    """Достижения и титулы за игровые ситуации (одноразовые, открывают титул)."""
+
+    async def test_city_win_grants_achievement_and_title(self, services, session):
+        from bot.database.repositories.social import UserAchievementRepository, UserTitleRepository
+
+        users = [await make_user(session, f"P{i}") for i in range(1, 7)]
+        game_id = await _start_game(
+            services, session, users, roles_setup={"mafia": 1, "detective": 1, "doctor": 1}
+        )
+        roles = await _roles_map(services, game_id)
+        mafia_uid = next(uid for uid, r in roles.items() if r == "mafia")
+        citizen_uid = next(uid for uid, r in roles.items() if r == "citizen")
+
+        await services.phases.begin_game(game_id)
+        await services.games.submit_night_action(game_id, mafia_uid, "kill", citizen_uid)
+        await services.phases.end_night(game_id)
+        await services.phases.begin_voting(game_id)
+        alive_city = [uid for uid, r in roles.items() if r != "mafia" and uid != citizen_uid]
+        for uid in alive_city:
+            await services.games.cast_vote(game_id, uid, mafia_uid)
+        await services.phases.end_voting(game_id)  # победа города
+
+        async with services.session_factory() as s:
+            ids = await UserAchievementRepository(s).ids_of(citizen_uid)
+            assert "city_win" in ids
+            assert "first_win" in ids  # первая победа
+            titles = await UserTitleRepository(s).ids_of(citizen_uid)
+            assert "veteran" in titles   # за city_win
+            assert "rookie" in titles    # за first_win
+
+    async def test_achievements_are_one_time(self, services, session):
+        from bot.services import rewards as rw
+
+        user = await make_user(session, "Once")
+        uid = user.id
+        earned = {uid: {"city_win", "first_win"}}
+        async with services.session_factory() as s:
+            first = await rw.award_achievements(s, earned)
+            await s.commit()
+            assert {a.id for a in first.get(uid, [])} == {"city_win", "first_win"}
+            # повторная выдача того же — ничего нового
+            second = await rw.award_achievements(s, earned)
+            await s.commit()
+            assert second.get(uid) is None or second.get(uid) == []
