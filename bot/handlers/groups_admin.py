@@ -1004,6 +1004,21 @@ _DEBUG_HELP_TEXT = """👑 <b>СПРАВОЧНИК ВЛАДЕЛЬЦА</b> (ур�
 
 <code>Профиль/рейтинг в группе показывают и локальную 🏠 статистику.</code>
 
+<b>👥 СОЦИАЛЬНОЕ</b> (все; цель — ID/@username/reply)
+/friend /accept /decline /unfriend · /friends /requests
+/ignore /unignore /ignored · /favorite /unfavorite /favorites
+/invite — позвать в свою открытую комнату (учитывает игнор)
+
+<b>📜 ИСТОРИЯ И ЗАПИСКИ</b> (все)
+/history — мои игры (пагинация) · /game_&lt;ID&gt; — детали партии
+/note &lt;текст&gt; — предсмертная записка (≤300, одна, утром)
+
+<b>🎓 ТИТУЛЫ · 🎪 НАГРАДЫ</b> (все — только свои данные)
+/titles · /title_set &lt;id&gt; — один активный титул
+/rewards · /reward_activate &lt;id&gt; — одна активная награда
+<code>/reward_create code|emoji|name|kind|дни|описание · /reward_list,
+/reward_grant &lt;цель&gt; code [дни] · /title_grant &lt;цель&gt; &lt;id&gt; — глобальный админ.</code>
+
 <b>📈 ПРОФИЛИ И СТАТИСТИКА</b>
 /player &lt;ID|@username|reply&gt; — {p1} VIEW_PROFILE
 /player_stats — аналог · /players — VIEW_PLAYERS
