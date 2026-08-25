@@ -177,18 +177,48 @@ _DURATION_RE = None  # компилируется лениво ниже
 
 
 def _parse_duration(token: str) -> int | None:
-    """'30m'/'2h'/'3d'/'1w' -> часы; чистое число считается часами. None — не срок."""
+    """Срок в МИНУТАХ из токена: 30m / 2h / 3d / 1w / 2mo.
+
+    Единицы: m — минута, h — час, d — день, w — неделя, mo — месяц (30 дней).
+    Чистое число без суффикса считается минутами. None — токен не похож на срок.
+    """
     import re
 
     global _DURATION_RE
     if _DURATION_RE is None:
-        _DURATION_RE = re.compile(r"^(\d+)([mhdw]?)$", re.IGNORECASE)
+        _DURATION_RE = re.compile(r"^(\d+)\s*(mo|m|h|d|w|мин|ч|д|нед|мес)?$", re.IGNORECASE)
     m = _DURATION_RE.match(token.strip())
     if not m:
         return None
-    value, suffix = int(m.group(1)), (m.group(2) or "h").lower()
-    hours = {"m": value / 60, "h": value, "d": value * 24, "w": value * 24 * 7}[suffix]
-    return hours if hours >= 1 else None  # меньше часа на варне/бане не имеет смысла
+    value = int(m.group(1))
+    suffix = (m.group(2) or "m").lower()
+    minutes = {
+        "m": value, "мин": value,
+        "h": value * 60, "ч": value * 60,
+        "d": value * 24 * 60, "д": value * 24 * 60,
+        "w": value * 7 * 24 * 60, "нед": value * 7 * 24 * 60,
+        "mo": value * 30 * 24 * 60, "мес": value * 30 * 24 * 60,
+    }[suffix]
+    return minutes if minutes >= 1 else None
+
+
+def _human_duration(minutes: float) -> str:
+    """1440 -> '1 день', 90 -> '1 ч 30 мин', 43200 -> '1 месяц'."""
+    total = int(minutes)
+    if total >= 30 * 24 * 60 and total % (30 * 24 * 60) == 0:
+        n = total // (30 * 24 * 60)
+        return f"{n} мес." if n > 1 else "1 месяц"
+    if total >= 7 * 24 * 60 and total % (7 * 24 * 60) == 0:
+        n = total // (7 * 24 * 60)
+        return f"{n} нед." if n > 1 else "1 неделю"
+    if total >= 24 * 60 and total % (24 * 60) == 0:
+        n = total // (24 * 60)
+        return f"{n} дн." if n > 1 else "1 день"
+    if total >= 60:
+        h, m = total // 60, total % 60
+        head = f"{h} ч" if h > 1 else "1 час"
+        return f"{head} {m} мин" if m else head
+    return f"{total} мин"
 
 
 async def _target_and_rest(message: Message, session):
@@ -214,9 +244,9 @@ async def _target_and_rest(message: Message, session):
 
 @router.message(Command("warn", "unwarn", "warnings"))
 async def cmd_warns(message: Message, session, group, db_user, services) -> None:
-    """Варны 2.0: причина + срок действия, N/N -> авто-бан на время.
+    """Варны: причина + срок действия, N/N -> авто-бан на сутки.
 
-    /warn @user 3d спам в чате   — варн на 3 дня с причиной
+    /warn @user 3d спам в чате   — варн на 3 дня с причиной (30m/2h/3d/1w/2mo)
     /warn @user спам             — срок по умолчанию (настройки группы, 7 дней)
     /unwarn @user                — снять последний активный варн
     /warnings @user              — список активных с причинами и сроками
@@ -270,16 +300,16 @@ async def cmd_warns(message: Message, session, group, db_user, services) -> None
         return
     _, target = resolved
     _, rest = await _target_and_rest(message, session)
-    duration_hours = None
+    duration_minutes = None
     reason = rest
     tokens = rest.split(maxsplit=1)
     if tokens:
         parsed = _parse_duration(tokens[0])
         if parsed is not None:
-            duration_hours = parsed
+            duration_minutes = parsed
             reason = tokens[1].strip() if len(tokens) > 1 else ""
     result = await services.groups.warn(
-        group.id, target.id, db_user.id, reason=reason, duration_hours=duration_hours
+        group.id, target.id, db_user.id, reason=reason, duration_minutes=duration_minutes
     )
     name = esc(display_name(target))
     if result["auto_ban_until"] is not None:
@@ -294,18 +324,17 @@ async def cmd_warns(message: Message, session, group, db_user, services) -> None
                 applied = True
             except TelegramAPIError as exc:
                 logger.warning("авто-бан 3/3 в Telegram не удался: %s", exc)
-        hours = result["ban_minutes"] / 60
         tail = " (в Telegram не применён — боту нужны права админа)" if not applied else ""
         await message.answer(
             f"⚠️ {name}: <b>{result['limit']}/{result['limit']}</b> — авто-бан в группе "
-            f"на {hours:g} ч. ({result['auto_ban_until']:%d.%m %H:%M}).{tail}"
+            f"на {_human_duration(result['ban_minutes'])} (до {result['auto_ban_until']:%d.%m %H:%M}).{tail}"
         )
         return
-    hours_left = (result["warn"].expires_at - result["warn"].created_at).total_seconds() / 3600
+    minutes_left = (result["warn"].expires_at - result["warn"].created_at).total_seconds() / 60
     reason_line = f" Причина: <i>{esc(reason)}</i>." if reason else ""
     await message.answer(
         f"⚠️ {name}: предупреждение <b>{result['count']}/{result['limit']}</b>. "
-        f"Действует {hours_left:g} ч.{reason_line}"
+        f"Действует {_human_duration(minutes_left)}.{reason_line}"
     )
 
 
@@ -321,10 +350,16 @@ async def cmd_mute(message: Message, session, group, db_user, services) -> None:
     mute = command == "mute"
     applied = False
     if mute and group is not None:
+        # срок: 30m / 2h / 3d / 1w / 2mo; чистое число = минуты (совместимость).
+        # По умолчанию — 60 минут; максимум — 366 дней.
         minutes = 60
-        parts = message.text.split()
-        if len(parts) >= 3 and parts[-1].isdigit():
-            minutes = max(1, min(1440, int(parts[-1])))
+        _, rest = await _target_and_rest(message, session)
+        tokens = rest.split(maxsplit=1)
+        if tokens:
+            parsed = _parse_duration(tokens[0])
+            if parsed is not None:
+                minutes = parsed
+        minutes = max(1, min(366 * 24 * 60, minutes))
         try:
             from datetime import datetime, timedelta, timezone
 
@@ -358,7 +393,7 @@ async def cmd_mute(message: Message, session, group, db_user, services) -> None:
     )
     await message.answer(
         f"🔇 {esc(display_name(target))}: {'мут' if mute else 'мут снят'}"
-        + (f" на {minutes} мин." if mute and applied else "")
+        + (f" на {_human_duration(minutes)}." if mute and applied else "")
         + ("" if applied else " (локальная запись; для мьюта в Telegram боту нужны права админа)")
     )
 
@@ -383,12 +418,12 @@ async def cmd_kick(message: Message, session, group, db_user, services) -> None:
 
 @router.message(Command("ban", "unban"))
 async def cmd_ban(message: Message, session, group, db_user, services) -> None:
-    """Бан 2.0: Moderator+ — временный (по умолчанию 1 день, максимум 7),
-    Admin+ — постоянный (или со сроком). /unban (Admin+) снимает и Telegram-бан.
+    """Бан — ТОЛЬКО Admin+ (у модератора доступа к бану нет).
 
-    /ban @user            — модеру: 1 день; админу: навсегда
-    /ban @user 3d спамит  — бан на срок с причиной
-    /unban @user          — полный разбан (локальный + Telegram)
+    /ban @user                — навсегда
+    /ban @user 30m|2h|3d|1w|2mo [причина] — бан на срок (мин/час/день/неделя/месяц)
+    /unban @user              — полный разбан (локальный + Telegram)
+    Авто-бан на сутки выдаётся системой при 3/3 активных варнах.
     """
     from datetime import timedelta
 
@@ -420,36 +455,26 @@ async def cmd_ban(message: Message, session, group, db_user, services) -> None:
         )
         return
 
-    # --- бан: входное право TEMP_BAN_PLAYER (Moderator+); постоянный — BAN_PLAYER
-    resolved = await _moderation_target(
-        message, session, services, group, Permission.TEMP_BAN_PLAYER
-    )
+    # --- бан: только BAN_PLAYER (Admin+)
+    resolved = await _moderation_target(message, session, services, group, Permission.BAN_PLAYER)
     if resolved is None:
         return
     access, target = resolved
-    permanent_right = Permission.BAN_PLAYER in access.permissions
 
-    target_obj, rest = await _target_and_rest(message, session)
-    duration_hours = None
+    _, rest = await _target_and_rest(message, session)
+    duration_minutes = None
     reason = rest
     tokens = rest.split(maxsplit=1)
     if tokens:
         parsed = _parse_duration(tokens[0])
         if parsed is not None:
-            duration_hours = parsed
+            duration_minutes = parsed
             reason = tokens[1].strip() if len(tokens) > 1 else ""
 
-    capped = False
-    if duration_hours is None:
-        if permanent_right:
-            until = None  # навсегда
-        else:
-            until = utcnow() + timedelta(days=1)  # модеру по умолчанию сутки
+    if duration_minutes is None:
+        until = None  # без срока — навсегда
     else:
-        if not permanent_right and duration_hours > 24 * 7:
-            duration_hours = 24 * 7  # потолок для модера — неделя
-            capped = True
-        until = utcnow() + timedelta(hours=duration_hours)
+        until = utcnow() + timedelta(minutes=duration_minutes)
 
     await services.groups.set_local_ban(group.id, target.id, True, db_user.id, until=until)
     applied = False
@@ -466,10 +491,11 @@ async def cmd_ban(message: Message, session, group, db_user, services) -> None:
     if until is None:
         head = f"🚫 {name}: бан в этой группе <b>навсегда</b>."
     else:
-        head = f"🚫 {name}: бан в группе до <b>{until:%d.%m.%Y %H:%M}</b>."
+        head = (
+            f"🚫 {name}: бан в группе на <b>{_human_duration(duration_minutes)}</b> "
+            f"(до {until:%d.%m.%Y %H:%M})."
+        )
     tail = ""
-    if capped:
-        tail += " (срок урезан до 7 дней — потолок для модератора)"
     if not applied:
         tail += " (в Telegram не применён — боту нужны права админа)"
     if reason:
@@ -1233,12 +1259,13 @@ _DEBUG_HELP_TEXT = """👑 <b>СПРАВОЧНИК ВЛАДЕЛЬЦА</b> (ур�
 /top /top_rating /top_wins /top_levels — топы 🌐/🏠 с пагинацией
 
 <b>🔨 МОДЕРАЦИЯ</b> (в группе; цель — ID/@username/reply; защита: нельзя карать себя и уровень ≥ своего)
-/mute [мин] /unmute — MUTE_PLAYER, Helper+ (Telegram-мут, 1–1440 мин)
+Единицы срока везде: 30m / 2h / 3d / 1w / 2mo (мин/час/день/неделя/месяц)
+/mute [срок] /unmute — MUTE_PLAYER, Helper+ (Telegram-мут, по умолч. 60 мин)
 /warn [срок] [причина] /unwarn /warnings — WARN_PLAYER, Moderator+
-    /warn @u 3d спам — варн на 3 дня с причиной; N/limit → авто-бан на время
+    /warn @u 3d спам — варн на 3 дня; N/limit → авто-бан на сутки (система)
 /kick — KICK_PLAYER, Moderator+ (реальный кик из группы)
-/ban [срок] — Moderator+: временный (по умолч. 1 день, макс 7)
-/ban — Admin+ (BAN_PLAYER): навсегда · /unban — Admin+, снимает и Telegram-бан
+/ban [срок] [причина] — ТОЛЬКО Admin+ (BAN_PLAYER): со сроком или навсегда
+    (у модератора доступа к бану нет) · /unban — Admin+, снимает и Telegram-бан
 
 <b>🎮 ИГРА И КОМНАТЫ</b>
 /game — активная игра в группе · /games — список

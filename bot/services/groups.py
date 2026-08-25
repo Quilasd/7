@@ -224,7 +224,7 @@ class GroupService:
         target_user_id: int,
         actor_user_id: int,
         reason: str = "",
-        duration_hours: int | None = None,
+        duration_minutes: int | None = None,
     ) -> dict:
         """Выдаёт варн с причиной и сроком действия.
 
@@ -239,9 +239,8 @@ class GroupService:
 
         async with self.session_factory() as session:
             settings = await GroupSettingsRepository(session).get_for(group_id)
-            expire_hours = duration_hours if duration_hours is not None else (
-                settings.warn_expire_hours if settings else 168
-            )
+            default_minutes = (settings.warn_expire_hours if settings else 168) * 60
+            expire_minutes = duration_minutes if duration_minutes is not None else default_minutes
             limit = settings.warn_limit if settings else 3
             ban_minutes = settings.warn_ban_minutes if settings else 1440
 
@@ -251,7 +250,7 @@ class GroupService:
                 actor_id=actor_user_id,
                 reason=(reason or "")[:500],
                 created_at=utcnow(),
-                expires_at=utcnow() + timedelta(hours=max(1, expire_hours)),
+                expires_at=utcnow() + timedelta(minutes=max(1, expire_minutes)),
             )
             session.add(warn)
 
@@ -370,8 +369,9 @@ class GroupService:
         async with self.session_factory() as session:
             repo = GroupPlayerRepository(session)
             gp = await repo.ensure(group_id, target_user_id)
-            if gp.is_banned == banned:
+            if gp.is_banned == banned and (not banned or gp.banned_until == until):
                 return banned, "Уже в таком состоянии."
+            # повторный бан обновляет срок (например, продлить/сократить)
             gp.is_banned = banned
             gp.banned_until = until if banned else None
             await AuditLogRepository(session).log(

@@ -52,8 +52,7 @@ class Permission(str, Enum):
     WARN_PLAYER = "WARN_PLAYER"
     MUTE_PLAYER = "MUTE_PLAYER"
     KICK_PLAYER = "KICK_PLAYER"
-    BAN_PLAYER = "BAN_PLAYER"          # постоянный бан (Admin+)
-    TEMP_BAN_PLAYER = "TEMP_BAN_PLAYER"  # временный бан со сроком (Moderator+)
+    BAN_PLAYER = "BAN_PLAYER"  # бан группы (Admin+): со сроком или навсегда
     MANAGE_ROOMS = "MANAGE_ROOMS"
     START_GAME = "START_GAME"
     STOP_GAME = "STOP_GAME"
@@ -73,17 +72,17 @@ LEVEL_PERMISSIONS: dict[AdminLevel, set[Permission]] = {
         Permission.VIEW_PROFILE, Permission.VIEW_PLAYERS, Permission.VIEW_STATS,
         Permission.MUTE_PLAYER,
     },
-    # Moderator — + варны (с причиной/сроком, 3/3 -> авто-бан), кик, временный бан
+    # Moderator — + варны (с причиной/сроком, 3/3 -> авто-бан на сутки) и кик.
+    # ДОСТУПА К БАНУ У МОДЕРАТОРА НЕТ.
     AdminLevel.MODERATOR: {
         Permission.VIEW_PROFILE, Permission.VIEW_PLAYERS, Permission.VIEW_STATS,
         Permission.MUTE_PLAYER, Permission.WARN_PLAYER, Permission.KICK_PLAYER,
-        Permission.TEMP_BAN_PLAYER,
     },
-    # Admin — + постоянный бан/разбан
+    # Admin — + бан (со сроком или навсегда) и разбан
     AdminLevel.ADMIN: {
         Permission.VIEW_PROFILE, Permission.VIEW_PLAYERS, Permission.VIEW_STATS,
         Permission.MUTE_PLAYER, Permission.WARN_PLAYER, Permission.KICK_PLAYER,
-        Permission.TEMP_BAN_PLAYER, Permission.BAN_PLAYER, Permission.MANAGE_ROOMS,
+        Permission.BAN_PLAYER, Permission.MANAGE_ROOMS,
         Permission.START_GAME, Permission.STOP_GAME, Permission.USE_DEBUG,
     },
     AdminLevel.SENIOR_ADMIN: {

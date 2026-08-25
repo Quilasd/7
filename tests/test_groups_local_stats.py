@@ -181,7 +181,7 @@ class TestModerationV2Service:
         group = await services.groups.get_or_create(-101300, "A")
 
         result = await services.groups.warn(
-            group.id, target.id, actor.id, reason="флуд", duration_hours=2
+            group.id, target.id, actor.id, reason="флуд", duration_minutes=120
         )
         assert result["count"] == 1
         # варн истёк -> неактивен и не считается

@@ -27,10 +27,9 @@ class TestLevelPermissions:
         # мут — у Helper (обратимая мера), варна у Helper больше нет
         assert Permission.MUTE_PLAYER in LP[AdminLevel.HELPER]
         assert Permission.WARN_PLAYER not in LP[AdminLevel.HELPER]
-        # Moderator: варн + кик + ВРЕМЕННЫЙ бан, постоянного бана НЕТ
+        # Moderator: варн + кик; бана НЕТ вообще
         assert Permission.WARN_PLAYER in LP[AdminLevel.MODERATOR]
         assert Permission.KICK_PLAYER in LP[AdminLevel.MODERATOR]
-        assert Permission.TEMP_BAN_PLAYER in LP[AdminLevel.MODERATOR]
         assert Permission.BAN_PLAYER not in LP[AdminLevel.MODERATOR]
         assert Permission.MANAGE_ROOMS not in LP[AdminLevel.MODERATOR]
         assert Permission.USE_DEBUG not in LP[AdminLevel.MODERATOR]
