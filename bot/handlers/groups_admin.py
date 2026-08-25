@@ -1253,6 +1253,7 @@ _DEBUG_HELP_TEXT = """👑 <b>СПРАВОЧНИК ВЛАДЕЛЬЦА</b> (ур�
 /history — мои игры (пагинация) · /game_&lt;ID&gt; — детали партии
 /top · /top_rating · /top_wins · /top_levels — топы 🌐/🏠 с пагинацией
 /group_stats · /global_stats — статистика групп/общая
+/achievements — все достижения (получено/скрыто)
 <code>«Играть» и «Правила» — кнопки главного меню, не команды.</code>
 
 <b>👥 СОЦИАЛЬНОЕ</b> (все; цель — ID/@username/reply)

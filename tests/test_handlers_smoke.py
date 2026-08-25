@@ -1149,3 +1149,72 @@ class TestWarnIds:
         assert any("последнее предупреждение" in t and "Активных: 1" in t for t in msg.answers)
         left = await services.groups.warnings_of(group.id, noisy.id)
         assert len(left) == 1 and all(w.id != last_id for w in left)
+
+
+class TestAchievementsCommand:
+    """«0/12» в профиле без списка: /achievements показывает все достижения."""
+
+    async def test_achievements_empty_shows_all_and_hides_hidden(self, services, session):
+        user = await make_user(session, "Newbie")
+        msg = FakeMessage(FakeTgUser(user.telegram_id), "/achievements")
+        await pf.cmd_achievements(msg, session=session, db_user=user)
+        text = msg.answers[0]
+        assert "ДОСТИЖЕНИЯ" in text and "0/12" in text
+        # все 11 открытых достижений видны с описанием
+        for name in ("Первая кровь", "Спаситель", "Живой щит", "Верная догадка", "Охотник",
+                     "Верный приговор", "Последний выживший", "Идеальное алиби", "Город встал",
+                     "Неудержимый", "Легенда"):
+            assert name in text, name
+        # скрытое (Снайпер) замаскировано до получения
+        assert "Снайпер" not in text and "Скрытое достижение" in text
+        assert "⬜" in text and "✅" not in text
+
+    async def test_achievements_after_award_shows_check(self, services, session):
+        from bot.database.repositories.social import UserAchievementRepository
+
+        user = await make_user(session, "Winner")
+        await UserAchievementRepository(session).award(user.id, "first_win")
+        await UserAchievementRepository(session).award(user.id, "sharpshooter")
+        await session.commit()
+
+        msg = FakeMessage(FakeTgUser(user.telegram_id), "/achievements")
+        await pf.cmd_achievements(msg, session=session, db_user=user)
+        text = msg.answers[0]
+        assert "2/12" in text
+        assert "✅ 🎉 <b>Первая кровь</b>" in text   # полученное — галочка
+        assert "✅ 🔫 <b>Снайпер</b>" in text       # скрытое после получения видно
+        assert "⬜ 🔥 Неудержимый" in text          # неполученное — пустое место
+
+    async def test_profile_callback_achievements_button(self, services, session, monkeypatch):
+        """Кнопка 🏅 Достижения в профиле (ProfileCB action=achievements)."""
+        user = await make_user(session, "Clicker")
+        captured: dict = {}
+
+        async def fake_edit(cb, text, kb=None):
+            captured["text"] = text
+
+        monkeypatch.setattr(pf, "edit_or_answer", fake_edit)
+        cb = FakeCallback(FakeTgUser(user.telegram_id))
+        await call_like_aiogram(
+            pf.cb_achievements, callback=cb, session=session, services=services,
+            db_user=user, group=None,
+        )
+        assert "ДОСТИЖЕНИЯ" in captured["text"] and "0/12" in captured["text"]
+
+    async def test_profile_command_in_group_shows_local_block(self, services, session):
+        """Команда /profile в группе обязана показывать и блок 🏠 ЭТА ГРУППА."""
+        user = await make_user(session, "Hero")
+        group = await services.groups.get_or_create(-609000, "Клуб")
+        gp = await GroupPlayerRepository(session).ensure(group.id, user.id)
+        gp.rating, gp.wins, gp.level, gp.xp = 386, 14, 7, 200
+        await session.commit()
+
+        msg = FakeMessage(FakeTgUser(user.telegram_id), "/profile",
+                          chat=FakeChat(group.telegram_chat_id))
+        await call_like_aiogram(
+            pf.cmd_profile, message=msg, command=FakeCommandObject(None),
+            session=session, services=services, db_user=user, group=group,
+        )
+        text = msg.answers[0]
+        assert "ГЛОБАЛЬНО" in text and "ЭТА ГРУППА" in text
+        assert "⭐ Общий: <b>386</b>" in text

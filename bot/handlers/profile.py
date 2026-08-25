@@ -109,6 +109,34 @@ def profile_group_block(group, group_player, progression=None, ranks=None) -> st
     ])
 
 
+def achievements_text(earned_ids: set[str]) -> str:
+    """Список ВСЕХ достижений: полученные/неполученные/скрытые.
+
+    Скрытые (hidden) до получения маскируются — «открой, чтобы узнать».
+    """
+    from bot.services import achievements as ach
+
+    items = ach.all_achievements()
+    earned = [a for a in items if a.id in earned_ids]
+    lines = [f"🏅 <b>ДОСТИЖЕНИЯ</b> — {len(earned)}/{len(items)}", ""]
+    for a in items:
+        if a.id in earned_ids:
+            lines.append(f"✅ {a.emoji} <b>{a.name}</b> — {a.description}")
+        elif a.hidden:
+            lines.append("❓ <i>Скрытое достижение</i> — открой, чтобы узнать")
+        else:
+            lines.append(f"⬜ {a.emoji} {a.name} — <i>{a.description}</i>")
+    lines.append("")
+    lines.append("<i>Достижения выдаются по итогам партий автоматически.</i>")
+    return "\n".join(lines)
+
+
+async def _earned_achievement_ids(session, user) -> set[str]:
+    from bot.database.repositories.social import UserAchievementRepository
+
+    return await UserAchievementRepository(session).ids_of(user.id)
+
+
 async def compute_profile_extras(session, user, services) -> dict:
     """Ранги (глобальные) + титул/награда/достижения/серия для блока профиля."""
     from bot.database.repositories.social import UserAchievementRepository
@@ -133,36 +161,33 @@ async def compute_profile_extras(session, user, services) -> dict:
 
 
 def profile_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(
-            text="✏️ Изменить имя", callback_data=ProfileCB(action="name").pack()
-        ),
-        InlineKeyboardButton(
-            text="📜 Мои игры", callback_data=ProfileCB(action="games").pack()
-        ),
-    ]])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="✏️ Изменить имя", callback_data=ProfileCB(action="name").pack()
+            ),
+            InlineKeyboardButton(
+                text="📜 Мои игры", callback_data=ProfileCB(action="games").pack()
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="🏅 Достижения", callback_data=ProfileCB(action="achievements").pack()
+            ),
+        ],
+    ])
 
 
-@router.message(Command("profile"))
-async def cmd_profile(message: Message, session, services, db_user) -> None:
-    data = await compute_profile_extras(session, db_user, services)
-    await message.answer(
-        profile_text(db_user, ranks=data["ranks"], extras=data["extras"]), reply_markup=profile_kb()
-    )
-
-
-@router.callback_query(MenuCB.filter(F.action == "profile"))
-async def cb_profile(callback: CallbackQuery, session, services, db_user, group) -> None:
+async def _full_profile_text(session, services, db_user, group) -> str:
+    """Глобальный блок + локальный блок группы (если вызвали в группе)."""
     from bot.database.repositories.groups import GroupPlayerRepository
 
-    await callback.answer()
     data = await compute_profile_extras(session, db_user, services)
     text = profile_text(db_user, ranks=data["ranks"], extras=data["extras"])
     if group is not None:
-        gp = await GroupPlayerRepository(session).get_membership(group.id, db_user.id)
+        group_repo = GroupPlayerRepository(session)
+        gp = await group_repo.get_membership(group.id, db_user.id)
         if gp:
-            # локальные позиции в топе этой группы (существующая система рейтингов)
-            group_repo = GroupPlayerRepository(session)
             local_ranks = {
                 "rating": await group_repo.rank_in_group(group.id, "rating", gp.rating),
                 "wins": await group_repo.rank_in_group(group.id, "wins", gp.wins),
@@ -171,7 +196,37 @@ async def cb_profile(callback: CallbackQuery, session, services, db_user, group)
             text += "\n\n———\n\n" + profile_group_block(group, gp, ranks=local_ranks)
         else:
             text += "\n\n🏠 Статистики в этой группе пока нет."
-    await edit_or_answer(callback, text, profile_kb())
+    return text
+
+
+@router.message(Command("profile"))
+async def cmd_profile(message: Message, session, services, db_user, group=None) -> None:
+    """В группе показывает ОБА блока: 🌐 глобальный + 🏠 эта группа."""
+    await message.answer(
+        await _full_profile_text(session, services, db_user, group), reply_markup=profile_kb()
+    )
+
+
+@router.message(Command("achievements"))
+async def cmd_achievements(message: Message, session, db_user) -> None:
+    """Список всех достижений: что есть, что получено, что скрыто."""
+    await message.answer(achievements_text(await _earned_achievement_ids(session, db_user)))
+
+
+@router.callback_query(MenuCB.filter(F.action == "profile"))
+async def cb_profile(callback: CallbackQuery, session, services, db_user, group) -> None:
+    await callback.answer()
+    await edit_or_answer(
+        callback, await _full_profile_text(session, services, db_user, group), profile_kb()
+    )
+
+
+@router.callback_query(ProfileCB.filter(F.action == "achievements"))
+async def cb_achievements(callback: CallbackQuery, session, db_user) -> None:
+    await callback.answer()
+    await edit_or_answer(
+        callback, achievements_text(await _earned_achievement_ids(session, db_user)), profile_kb()
+    )
 
 
 @router.callback_query(MenuCB.filter(F.action == "settings"))
