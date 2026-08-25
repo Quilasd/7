@@ -666,3 +666,110 @@ class TestRatingsHandlers:
         msg2 = FakeMessage(FakeTgUser(player.telegram_id), "/global_stats")
         await rt.cmd_global_stats(msg2, session=session)
         assert msg.answers and msg2.answers
+
+
+# ------------------------------------------------ регрессия кнопки «Профиль»
+
+import inspect
+
+import bot.handlers.profile as pf
+from bot.database.repositories.groups import GroupPlayerRepository
+
+
+async def call_like_aiogram(handler, **data):
+    """Вызов хендлера ровно так, как это делает aiogram: только параметры,
+    объявленные в сигнатуре (DI по имени). Ловит NameError вида
+    «используется services, которого нет в сигнатуре» — регрессия кнопки профиля."""
+    sig = inspect.signature(handler)
+    kwargs = {k: v for k, v in data.items() if k in sig.parameters}
+    await handler(**kwargs)
+
+
+class TestProfileButtonRegression:
+    """Кнопка 👤 Профиль (MenuCB action=profile) сломалась: cb_profile вызывал
+    services, не объявив его в сигнатуре -> NameError на каждом нажатии."""
+
+    async def test_profile_callback_no_crash_private(self, services, session, monkeypatch):
+        user = await make_user(session, "Hero")
+        captured: dict = {}
+
+        async def fake_edit(cb, text, kb=None):
+            captured["text"] = text
+
+        monkeypatch.setattr(pf, "edit_or_answer", fake_edit)
+        cb = FakeCallback(FakeTgUser(user.telegram_id))
+        # до фикса: services не в сигнатуре -> NameError внутри хендлера
+        await call_like_aiogram(
+            pf.cb_profile, callback=cb, session=session, services=services,
+            db_user=user, group=None,
+        )
+        assert "ГЛОБАЛЬНО" in captured["text"]
+
+    async def test_profile_callback_global_and_local_scopes(self, services, session, monkeypatch):
+        """Профиль обязан показывать ОБА рейтинга: 🌐 глобальный и 🏠 этой группы
+        (существующая система global/local), включая локальные позиции в топе."""
+        user = await make_user(session, "Hero")
+        user.rating, user.wins, user.level, user.xp = 1428, 47, 12, 500
+
+        group = await services.groups.get_or_create(-604200, "Клуб")
+        gp = await GroupPlayerRepository(session).ensure(group.id, user.id)
+        gp.rating, gp.wins, gp.level, gp.xp = 386, 14, 7, 200
+        other = await make_user(session, "Rival")
+        gp2 = await GroupPlayerRepository(session).ensure(group.id, other.id)
+        gp2.rating, gp2.wins, gp2.level, gp2.xp = 100, 2, 2, 50
+        await session.commit()
+
+        captured: dict = {}
+
+        async def fake_edit(cb, text, kb=None):
+            captured["text"] = text
+
+        monkeypatch.setattr(pf, "edit_or_answer", fake_edit)
+        cb = FakeCallback(FakeTgUser(user.telegram_id))
+        await call_like_aiogram(
+            pf.cb_profile, callback=cb, session=session, services=services,
+            db_user=user, group=group,
+        )
+        text = captured["text"]
+        # глобальный scope
+        assert "ГЛОБАЛЬНО" in text
+        assert "⭐ Общий: <b>1428</b>" in text
+        assert "(#" in text
+        # локальный scope (не заменён глобальным!)
+        assert "ЭТА ГРУППА" in text
+        assert "⭐ Общий: <b>386</b> (#1)" in text
+        assert "🏆 Побед: <b>14</b> (#1)" in text
+        assert "📈 Уровень: <b>7</b> (#1)" in text
+
+    async def test_profile_command_and_settings_callback_ok(self, services, session, monkeypatch):
+        """Соседние точки входа профиля (/profile, кнопка Настройки) не регрессировали."""
+        user = await make_user(session, "Hero")
+        msg = FakeMessage(FakeTgUser(user.telegram_id), "/profile")
+        await call_like_aiogram(
+            pf.cmd_profile, message=msg, command=FakeCommandObject(None),
+            session=session, services=services, db_user=user,
+        )
+        assert msg.answers and "ГЛОБАЛЬНО" in msg.answers[0]
+
+        captured: dict = {}
+
+        async def fake_edit(cb, text, kb=None):
+            captured["text"] = text
+
+        monkeypatch.setattr(pf, "edit_or_answer", fake_edit)
+        cb = FakeCallback(FakeTgUser(user.telegram_id))
+        await call_like_aiogram(
+            pf.cb_settings, callback=cb, session=session, services=services, db_user=user,
+        )
+        assert "ГЛОБАЛЬНО" in captured["text"]
+
+    async def test_group_block_without_ranks_still_renders(self):
+        """profile_group_block работает и без рангов (обратная совместимость)."""
+        from types import SimpleNamespace
+
+        gp = SimpleNamespace(rating=10, wins=3, losses=1, level=2, xp=40,
+                             games_played=4, kills=0, saves=0, investigations=0,
+                             correct_votes=0, win_streak=1, best_win_streak=2)
+        group = SimpleNamespace(title="G")
+        text = pf.profile_group_block(group, gp)
+        assert "ЭТА ГРУППА" in text and "⭐ Общий: <b>10</b>" in text

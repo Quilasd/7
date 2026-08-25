@@ -41,12 +41,10 @@ def profile_text(user, header: bool = True, progression=None, ranks=None, extras
         return f" (#{pos})" if pos else ""
 
     lines = ["🌐 <b>ГЛОБАЛЬНО</b>", ""]
-    # компактный рейтинг-блок + серия побед
-    lines.append(
-        f"⭐ Рейтинг: <b>{user.rating}</b>{_rank('rating')}  ·  "
-        f"🏆 Побед: <b>{user.wins}</b>{_rank('wins')}  ·  "
-        f"📈 Уровень: <b>{user.level}</b>{_rank('level')}"
-    )
+    # компактный рейтинг-блок: общий/победы/уровень с позициями в топе
+    lines.append(f"⭐ Общий: <b>{user.rating}</b>{_rank('rating')}")
+    lines.append(f"🏆 Побед: <b>{user.wins}</b>{_rank('wins')}")
+    lines.append(f"📈 Уровень: <b>{user.level}</b>{_rank('level')}")
     streak = extras.get("win_streak", 0)
     best = extras.get("best_win_streak", 0)
     lines.append(f"🔥 Серия побед: <b>{streak}</b> / 🏆 Лучшая серия: <b>{best}</b>")
@@ -77,20 +75,31 @@ def profile_text(user, header: bool = True, progression=None, ranks=None, extras
     return "\n".join(lines)
 
 
-def profile_group_block(group, group_player, progression=None) -> str:
-    """Локальный блок: статистика игрока В КОНКРЕТНОЙ группе (GroupPlayer)."""
+def profile_group_block(group, group_player, progression=None, ranks=None) -> str:
+    """Локальный блок: статистика игрока В КОНКРЕТНОЙ группе (GroupPlayer).
+
+    ranks: {'rating': int, 'wins': int, 'level': int} — позиции в топе группы.
+    """
     from bot.services.progression import DEFAULT_PROGRESSION
 
     progression = progression or DEFAULT_PROGRESSION
+    ranks = ranks or {}
     gp = group_player
     total = gp.wins + gp.losses
     winrate = (gp.wins / total * 100) if total else 0.0
     _, in_level, need = progression.xp_progress_in_level(gp.xp)
     streak = getattr(gp, "win_streak", 0) or 0
     best = getattr(gp, "best_win_streak", 0) or 0
+
+    def _rank(key: str) -> str:
+        pos = ranks.get(key)
+        return f" (#{pos})" if pos else ""
+
     return "\n".join([
         f"🏠 <b>ЭТА ГРУППА</b>\n<i>{esc(group.title or '')}</i>\n",
-        f"⭐ Рейтинг: <b>{gp.rating}</b>  ·  🏆 Побед: <b>{gp.wins}</b>  ·  📈 Уровень: <b>{gp.level}</b>",
+        f"⭐ Общий: <b>{gp.rating}</b>{_rank('rating')}",
+        f"🏆 Побед: <b>{gp.wins}</b>{_rank('wins')}",
+        f"📈 Уровень: <b>{gp.level}</b>{_rank('level')}",
         f"🔥 Серия: <b>{streak}</b> / 🏆 Лучшая: <b>{best}</b>",
         f"✨ XP: <b>{gp.xp}</b> (до следующего уровня {in_level}/{need})",
         f"💀 Поражений: <b>{gp.losses}</b>  ·  🎮 Игр: <b>{gp.games_played}</b>  ·  📈 Winrate: <b>{winrate:.0f}%</b>",
@@ -143,7 +152,7 @@ async def cmd_profile(message: Message, session, services, db_user) -> None:
 
 
 @router.callback_query(MenuCB.filter(F.action == "profile"))
-async def cb_profile(callback: CallbackQuery, session, db_user, group) -> None:
+async def cb_profile(callback: CallbackQuery, session, services, db_user, group) -> None:
     from bot.database.repositories.groups import GroupPlayerRepository
 
     await callback.answer()
@@ -152,7 +161,14 @@ async def cb_profile(callback: CallbackQuery, session, db_user, group) -> None:
     if group is not None:
         gp = await GroupPlayerRepository(session).get_membership(group.id, db_user.id)
         if gp:
-            text += "\n\n———\n\n" + profile_group_block(group, gp)
+            # локальные позиции в топе этой группы (существующая система рейтингов)
+            group_repo = GroupPlayerRepository(session)
+            local_ranks = {
+                "rating": await group_repo.rank_in_group(group.id, "rating", gp.rating),
+                "wins": await group_repo.rank_in_group(group.id, "wins", gp.wins),
+                "level": await group_repo.rank_in_group(group.id, "level", gp.level, gp.xp),
+            }
+            text += "\n\n———\n\n" + profile_group_block(group, gp, ranks=local_ranks)
         else:
             text += "\n\n🏠 Статистики в этой группе пока нет."
     await edit_or_answer(callback, text, profile_kb())
