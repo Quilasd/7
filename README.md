@@ -325,7 +325,7 @@ Owner (уровень 5 назначается только через `OWNER_ID
 - **Модерация:** `/warn /unwarn /warnings /mute /unmute /kick /ban /unban`
 - **Игра:** `/game /games /game_info /game_players /game_phase /game_start /game_stop /game_cancel /game_kill /game_revive`
 - **Комнаты:** `/rooms /room /room_close /room_kick /room_force_start /createroom`
-- **Штат:** `/staff /staff_add /staff_remove /staff_promote /staff_demote /staff_info`
+- **Штат:** `/staff /staff_add /staff_remove /staff_promote /staff_demote /staff_info` · `/claim` — создатель группы (Telegram `status="creator"`) забирает права 🎖 Senior Admin (4) локально в этой группе, без требования MANAGE_STAFF; повторный `/claim` и вызов уже-Senior — no-op, в аудит пишется `group_claim`
 - **Настройки:** `/settings` (inline-меню) + `/set_min_players /set_max_players /set_night_time /set_day_time /set_vote_time /set_roles`
 - **Массовые:** `/broadcast /announce`
 - **Система:** `/botstats /logs /reload /maintenance`
@@ -367,6 +367,11 @@ UX: серверные проверки прав не зависят от вид
   бот-команды уровень 5 выдать/снять нельзя (защита от захвата).
 - **Глобальные ADMIN_IDS = Senior Admin (4) во всех чатах**, локальные
   GroupAdmin-уровни действуют только в своей группе.
+- **`/claim` — создатель группы получает Senior Admin без выдачи от других
+  админов**: статус проверяется через `get_chat_member` (`status == "creator"`),
+  права выдаются локально (`GroupAdmin`, `created_by=0`), действие пишется в
+  аудит как `group_claim`; если уровень уже ≥ Senior Admin — no-op. Это даёт
+  владельцу группы возможность управлять ею, не дожидаясь глобальной администрации.
 - **Мут — через Telegram restrict_chat_member** (1–1440 минут); если бот не
   имеет прав администратора в группе — сообщаем об этом, а не падаем.
 - **Изменение настроек группы через `/settings` пишется в AuditLog**

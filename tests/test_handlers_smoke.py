@@ -11,7 +11,7 @@ import bot.handlers.groups_admin as ga
 import bot.handlers.testgame as tg
 import bot.handlers.ratings as rt
 from bot.database.repositories.groups import GroupAdminRepository
-from bot.services.permissions import AdminLevel
+from bot.services.permissions import AdminLevel, Permission
 from bot.utils.callbacks import SettingCB
 from tests.conftest import make_user
 
@@ -34,8 +34,9 @@ class FakeChat:
 class FakeBot:
     """ Telegram-бот: restrict_chat_member либо успех, либо TelegramAPIError."""
 
-    def __init__(self, fail: bool = False) -> None:
+    def __init__(self, fail: bool = False, member_status: str = "member") -> None:
         self.fail = fail
+        self.member_status = member_status
         self.calls: list[dict] = []
 
     async def restrict_chat_member(self, **kwargs) -> bool:
@@ -45,6 +46,17 @@ class FakeBot:
         if self.fail:
             raise TelegramAPIError(method="restrictChatMember", message="not enough rights")
         return True
+
+    async def get_chat_member(self, *, chat_id: int, user_id: int):
+        """Возвращает объект с .status для проверки создателя группы (/claim)."""
+        from types import SimpleNamespace
+
+        from aiogram.exceptions import TelegramAPIError
+
+        self.calls.append({"chat_id": chat_id, "user_id": user_id})
+        if self.fail:
+            raise TelegramAPIError(method="getChatMember", message="forbidden")
+        return SimpleNamespace(status=self.member_status)
 
 
 class FakeMessage:
@@ -302,6 +314,63 @@ class TestStaffCommands:
                           chat=FakeChat(group.telegram_chat_id))
         await ga.cmd_staff(msg, session=session, group=group, services=services)
         assert any("Senior" in t or "штаб пуст" in t for t in msg.answers)
+
+
+class TestClaimCommand:
+    async def test_claim_creator_gets_senior_and_audit(self, services, session):
+        creator = await make_user(session, "Creator")
+        group = await services.groups.get_or_create(-603000, "A")
+        bot = FakeBot(member_status="creator")
+        msg = FakeMessage(FakeTgUser(creator.telegram_id), "/claim",
+                          chat=FakeChat(group.telegram_chat_id), bot=bot)
+        await ga.cmd_claim(msg, session=session, group=group, services=services, db_user=creator)
+
+        # ответ про выдачу Senior Admin
+        assert any("Senior Admin" in t for t in msg.answers)
+        # уровень 4 в группе
+        assert await services.permissions.group_level(
+            session, group.id, creator.telegram_id) == AdminLevel.SENIOR_ADMIN
+        # появилось право MANAGE_SETTINGS
+        access = await services.permissions.resolve(session, creator.telegram_id, group.id)
+        assert Permission.MANAGE_SETTINGS in access.permissions
+        # в аудите записано действие group_claim (actor == target == creator)
+        logs = await services.audit.last(group_id=group.id, limit=5)
+        entry = next((log for log in logs if log.action == "group_claim"), None)
+        assert entry is not None
+        assert entry.actor_id == creator.id
+        assert entry.target_id == creator.id
+        assert "was 0" in entry.details
+
+    async def test_claim_non_creator_denied(self, services, session):
+        member = await make_user(session, "Member")
+        group = await services.groups.get_or_create(-603100, "A")
+        bot = FakeBot(member_status="member")
+        msg = FakeMessage(FakeTgUser(member.telegram_id), "/claim",
+                          chat=FakeChat(group.telegram_chat_id), bot=bot)
+        await ga.cmd_claim(msg, session=session, group=group, services=services, db_user=member)
+        assert any("только создатель" in t.lower() for t in msg.answers)
+        # уровень не изменился
+        assert await services.permissions.group_level(
+            session, group.id, member.telegram_id) == AdminLevel.PLAYER
+
+    async def test_claim_private_chat_denied(self, services, session):
+        creator = await make_user(session, "Creator")
+        msg = FakeMessage(FakeTgUser(creator.telegram_id), "/claim")
+        await ga.cmd_claim(msg, session=session, group=None, services=services, db_user=creator)
+        assert any("только внутри группы" in t for t in msg.answers)
+
+    async def test_claim_already_senior_is_noop(self, services, session):
+        senior = await make_user(session, "Senior")
+        group = await services.groups.get_or_create(-603200, "A")
+        await _set_staff(services.session_factory, group.id, senior.id, 4)
+        bot = FakeBot(member_status="creator")
+        msg = FakeMessage(FakeTgUser(senior.telegram_id), "/claim",
+                          chat=FakeChat(group.telegram_chat_id), bot=bot)
+        await ga.cmd_claim(msg, session=session, group=group, services=services, db_user=senior)
+        assert any("уже есть права" in t for t in msg.answers)
+        # прямой вызов сервиса на уже-Senior — тоже no-op, без ошибки
+        ok, result = await services.groups.claim_creator(group.id, senior.id)
+        assert ok is False and result == "уже есть права"
 
 
 class TestSystemCommands:

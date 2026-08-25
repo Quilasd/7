@@ -150,6 +150,40 @@ class GroupService:
             await session.commit()
         return True, "Администратор снят."
 
+    async def claim_creator(self, group_id: int, user_id: int) -> tuple[bool, str]:
+        """Выдаёт Senior Admin (4) реальному создателю группы по /claim.
+
+        Хендлер уже проверил, что в Telegram вызывающий — создатель чата; здесь
+        остаётся только бизнес-логика уровня. Если уровень уже >= Senior Admin —
+        no-op. Действие пишется в аудит (actor == target == user).
+        """
+        from bot.database.repositories.groups import AuditLogRepository
+
+        async with self.session_factory() as session:
+            admins = GroupAdminRepository(session)
+            current = AdminLevel(await admins.level_of(group_id, user_id))
+            if current >= AdminLevel.SENIOR_ADMIN:
+                return False, "уже есть права"
+            await admins.set_level(
+                group_id, user_id, AdminLevel.SENIOR_ADMIN, created_by=0
+            )
+            await AuditLogRepository(session).log(
+                actor_id=user_id,
+                target_id=user_id,
+                group_id=group_id,
+                action="group_claim",
+                details=f"creator -> senior (was {current.value})",
+            )
+            await session.commit()
+        logger.info(
+            "Группа %s: %s забрал права создателя (был уровень %s)",
+            group_id, user_id, current.value,
+        )
+        return True, (
+            "👑 Ты создатель группы — выдан уровень 🎖 Senior Admin! "
+            "Управляй: /settings · /staff_add · /createroom · /top"
+        )
+
     # -------------------------------------------------------- топы группы
 
     async def local_top(

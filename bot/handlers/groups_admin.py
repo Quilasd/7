@@ -9,7 +9,7 @@
   Игра:     /game /games /game_info /game_players /game_phase
             /game_start /game_stop /game_cancel /game_kill /game_revive
   Комнаты:  /rooms /room /room_close /room_kick /room_force_start
-  Персонал: /staff /staff_add /staff_remove /staff_promote /staff_demote /staff_info
+  Персонал: /staff /staff_add /staff_remove /staff_promote /staff_demote /staff_info /claim
   Настройки:/settings /set_min_players /set_max_players /set_night_time
             /set_day_time /set_vote_time /set_roles
   Массовые: /broadcast /announce
@@ -499,6 +499,34 @@ async def cmd_create_group_room(message: Message, session, group, services, db_u
 
 # ----------------------------------------------------------------- персонал
 
+@router.message(Command("claim"))
+async def cmd_claim(message: Message, session, group, services, db_user) -> None:
+    """Забрать права создателя группы: выдаёт Senior Admin (4).
+
+    Доступ — только настоящему создателю Telegram-чата (status == "creator"),
+    проверяется через get_chat_member. Права выдаются локально в этой группе.
+    """
+    if group is None:
+        await message.answer("Эта команда работает только внутри группы.")
+        return
+    access = await _access(session, services, message.from_user.id, group)
+    if access.level >= AdminLevel.SENIOR_ADMIN:
+        await message.answer("уже есть права")
+        return
+    try:
+        member = await message.bot.get_chat_member(
+            chat_id=group.telegram_chat_id, user_id=message.from_user.id
+        )
+    except TelegramAPIError:
+        await message.answer("не удалось проверить, попробуй позже")
+        return
+    if member.status != "creator":
+        await message.answer("Право получает только создатель этой группы.")
+        return
+    ok, result = await services.groups.claim_creator(group.id, db_user.id)
+    await message.answer(("✅ " if ok else "") + esc(result))
+
+
 @router.message(Command("staff"))
 async def cmd_staff(message: Message, session, group, services) -> None:
     if await _require(session, services, message, group, Permission.VIEW_PLAYERS) is None:
@@ -943,6 +971,8 @@ _DEBUG_HELP_TEXT = """👑 <b>СПРАВОЧНИК ВЛАДЕЛЬЦА</b> (ур�
 <b>👥 ШТАТ</b> (MANAGE_STAFF; защита: не ≥ своего уровня)
 /staff · /staff_add &lt;цель&gt; 1-4 · /staff_remove
 /staff_promote · /staff_demote · /staff_info
+<code>/claim — создатель группы забирает Senior Admin (4) без прав MANAGE_STAFF;
+проверяется status="creator" в Telegram, выдача — локально в этой группе.</code>
 
 <b>⚙️ НАСТРОЙКИ ГРУППЫ</b> (MANAGE_SETTINGS, только в группе)
 /settings — inline-меню (Игроки/Таймеры/Роли/Голосование/Рейтинг/XP/Доп.)
