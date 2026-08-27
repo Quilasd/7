@@ -40,11 +40,13 @@ class GameManager:
         notifier: Notifier,
         phases: PhaseManager,
         locks: GameLocks,
+        game_chats=None,
     ) -> None:
         self.session_factory = session_factory
         self.notifier = notifier
         self.phases = phases
         self.locks = locks
+        self.game_chats = game_chats
 
     # ------------------------------------------------------------ старт игры
 
@@ -122,6 +124,27 @@ class GameManager:
             logger.info(
                 "Игра %s создана из комнаты %s: %s игроков", game.id, room.id, len(players)
             )
+            # Игровые чаты (Game Chat / Mafia Chat): бот не может создавать чаты
+            # в Telegram Bot API — создатель партии делает это сам и привязывает
+            # командами /gamechat и /mafiachat (инструкция в ЛС).
+            if self.game_chats is not None:
+                try:
+                    await self.notifier.send(
+                        creator_user_id,
+                        "🎮 <b>Игра #{g} запущена!</b>\n\n"
+                        "Хотите отдельные чаты партии? Telegram не позволяет боту "
+                        "создавать группы, поэтому:\n"
+                        "1️⃣ создайте группу <b>🎮 Мафия — Игра #{g}</b> для обсуждений;\n"
+                        "2️⃣ создайте группу <b>🌙 Мафия — Игра #{g}</b> для мафии;\n"
+                        "3️⃣ добавьте бота администратором в обе;\n"
+                        "4️⃣ в первой напишите <code>/gamechat {g}</code>, "
+                        "во второй — <code>/mafiachat {g}</code>.\n\n"
+                        "Бот сам пришлёт игрокам ссылки, будет управлять правами "
+                        "по фазам и анонсами. Без чатов игра идёт как раньше — "
+                        "полностью в личке.".format(g=game.id),
+                    )
+                except Exception:
+                    logger.warning("Не удалось отправить инструкцию по чатам")
             return ActionResult(
                 True,
                 f"🎮 Игра #{game.id} запущена! Роли распределены, первая ночь через {countdown} сек.",
@@ -309,6 +332,11 @@ class GameManager:
                     await self.notifier.send(
                         gp.user.telegram_id, game_view.death_personal_text(gp, "left")
                     )
+                if self.game_chats is not None:
+                    try:
+                        await self.game_chats.on_death(session, game, gp)
+                    except Exception:
+                        logger.warning("GameChat: сбой обработки выхода игрока")
                 # предложить предсмертную записку (опубликуется следующим утром или в конце игры)
                 await self.phases._record_death_note(session, game, gp)
                 logger.info("Игра %s: игрок %s покинул игру", game.id, user_id)

@@ -61,6 +61,7 @@ class PhaseManager:
         locks: GameLocks | None = None,
         rating: RatingService | None = None,
         app_settings=None,
+        game_chats=None,
     ) -> None:
         self.session_factory = session_factory
         self.notifier = notifier
@@ -69,6 +70,21 @@ class PhaseManager:
         self.rating = rating or RatingService()
         # app_settings: объект с флагами DEBUG_AFFECTS_* (bot.config.Settings)
         self.app_settings = app_settings
+        # GameChatService | None — игровые чаты партии (необязательный слой)
+        self.game_chats = game_chats
+
+    async def _chats_call(self, method_name: str, *args) -> None:
+        """Хук игровых чатов: сбой чатов НЕ ломает игровой поток."""
+        service = getattr(self, "game_chats", None)
+        if service is None:
+            return
+        try:
+            await getattr(service, method_name)(*args)
+        except Exception:
+            logger.warning(
+                "GameChat: сбой синхронизации чатов (игра продолжается)",
+                exc_info=True,
+            )
 
     # ------------------------------------------------------------------ utils
 
@@ -170,6 +186,11 @@ class PhaseManager:
                     })
                 await session.commit()
 
+                for death in outcome.deaths:
+                    victim = by_user_id.get(death.user_id)
+                    if victim:
+                        await self._chats_call("on_death", session, game, victim)
+
                 win = evaluate_win(players)
                 if win is not None:
                     await self._end_game(session, game, players, win)
@@ -256,6 +277,7 @@ class PhaseManager:
                     keyboard,
                 )
         self._schedule(game.id, "night", seconds, partial(self.end_night, game.id))
+        await self._chats_call("on_night_started", session, game, players)
         logger.info("Игра %s: ночь #%s начата", game.id, game.day_number)
 
     async def _valid_night_targets(
@@ -296,6 +318,7 @@ class PhaseManager:
         for gp in alive:
             await self._send(gp.user.telegram_id, text)
         self._schedule(game.id, "day", seconds, partial(self.begin_voting, game.id))
+        await self._chats_call("on_day_started", session, game, players)
         logger.info("Игра %s: день #%s начат", game.id, game.day_number)
 
     async def _begin_voting(
@@ -376,6 +399,7 @@ class PhaseManager:
                 # текущую фазу/переход к ночи не ломаем
                 await self._record_death_note(session, game, victim)
                 await session.commit()
+                await self._chats_call("on_death", session, game, victim)
 
         win = evaluate_win(players)
         if win is not None:
@@ -620,6 +644,7 @@ class PhaseManager:
                     lines.append(f"🎓 Открыт титул: {', '.join(dict.fromkeys(unlocked_titles))}.")
                 personal = personal + "\n" + "\n".join(lines)
             await self._send(gp.user.telegram_id, f"{overview}\n\n———\n{personal}")
+        await self._chats_call("on_game_ended", session, game, players, title)
         logger.info(
             "GAME FINISH COMPLETE: игра %s, победитель=%s%s (global=%s, local=%s)",
             game.id, game.winner, " (тест)" if test_mode else "", apply_global, apply_local,
@@ -659,6 +684,13 @@ class PhaseManager:
                 delay = 1  # дедлайн прошёл — отрабатываем почти сразу
             self.timers.schedule(game.id, f"recover-{game.status}", delay, partial(callback, game.id))
             recovered += 1
+        if self.game_chats is not None:
+            try:
+                chats_recovered = await self.game_chats.recover(session)
+                if chats_recovered:
+                    logger.info("Восстановлено прав игровых чатов: %s", chats_recovered)
+            except Exception:
+                logger.warning("GameChat: сбой восстановления чатов", exc_info=True)
         if recovered:
             logger.info("Восстановлено активных игр: %s", recovered)
         return recovered

@@ -12,6 +12,7 @@ from bot.database.database import init_db
 from bot.database.models import Room, RoomPlayer, User
 from bot.services.app_config import AppConfigService
 from bot.services.audit import AuditService
+from bot.services.game_chat import GameChatService, NoopGameChatGateway
 from bot.services.game_manager import GameManager
 from bot.services.groups import GroupService
 from bot.services.permissions import PermissionService
@@ -95,10 +96,12 @@ async def services(session_factory, notifier):
     locks = GameLocks()
     app_settings = SettingsStub()
     rating = RatingService()
+    game_chats = GameChatService(session_factory, NoopGameChatGateway(), notifier)
     phases = PhaseManager(
-        session_factory, notifier, timers, locks, rating=rating, app_settings=app_settings
+        session_factory, notifier, timers, locks, rating=rating, app_settings=app_settings,
+        game_chats=game_chats,
     )
-    games = GameManager(session_factory, notifier, phases, locks)
+    games = GameManager(session_factory, notifier, phases, locks, game_chats=game_chats)
     app_config = AppConfigService(session_factory, SettingsStub())
     rooms = RoomService(session_factory, notifier, app_config)
     permissions = PermissionService(app_settings)
@@ -122,6 +125,7 @@ async def services(session_factory, notifier):
     container.audit = audit
     container.rating = rating
     container.maintenance = None
+    container.game_chats = GameChatService(session_factory, NoopGameChatGateway(), notifier)
     yield container
     test_games.stop_all()
     timers.cancel_all()

@@ -5,6 +5,7 @@ from aiogram import Router
 from bot.handlers import (
     admin,
     game,
+    game_chats,
     owner,
     groups_admin,
     history,
@@ -34,6 +35,7 @@ def get_root_router() -> Router:
     root.include_router(rooms.router)
     root.include_router(game.router)
     root.include_router(voting.router)
+    root.include_router(game_chats.router)
     return root
 
 

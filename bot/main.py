@@ -19,6 +19,7 @@ from bot.config import get_settings
 from bot.database.database import create_engine, create_session_factory, dispose_engine, init_db
 from bot.handlers import get_root_router
 from bot.middlewares import (
+    GameChatGuardMiddleware,
     DbSessionMiddleware,
     GroupContextMiddleware,
     MaintenanceMiddleware,
@@ -30,6 +31,7 @@ from bot.services.app_config import AppConfigService
 from bot.services.audit import AuditService
 from bot.services.rewards import RewardService
 from bot.services.social import SocialService
+from bot.services.game_chat import GameChatService, TelegramGameChatGateway
 from bot.services.game_manager import GameManager
 from bot.services.groups import GroupService
 from bot.services.permissions import PermissionService
@@ -50,7 +52,7 @@ class Services:
 
     def __init__(self, session_factory, notifier, timers, phases, games, rooms, app_config,
                  test_games, settings, permissions, groups, audit, rating, maintenance,
-                 social, rewards):
+                 social, rewards, game_chats=None):
         self.session_factory = session_factory
         self.notifier = notifier
         self.timers = timers
@@ -67,6 +69,7 @@ class Services:
         self.maintenance = maintenance
         self.social = social
         self.rewards = rewards
+        self.game_chats = game_chats
 
 
 def build_services(bot: Bot, settings) -> tuple[Services, TimerManager]:
@@ -77,10 +80,12 @@ def build_services(bot: Bot, settings) -> tuple[Services, TimerManager]:
     timers = TimerManager()
     locks = GameLocks()
     rating = RatingService()
+    game_chats = GameChatService(session_factory, TelegramGameChatGateway(bot), notifier)
     phases = PhaseManager(
-        session_factory, notifier, timers, locks, rating=rating, app_settings=settings
+        session_factory, notifier, timers, locks, rating=rating, app_settings=settings,
+        game_chats=game_chats,
     )
-    games = GameManager(session_factory, notifier, phases, locks)
+    games = GameManager(session_factory, notifier, phases, locks, game_chats=game_chats)
     app_config = AppConfigService(session_factory, settings)
     rooms = RoomService(
         session_factory,
@@ -99,6 +104,7 @@ def build_services(bot: Bot, settings) -> tuple[Services, TimerManager]:
     services = Services(
         session_factory, notifier, timers, phases, games, rooms, app_config, test_games,
         settings, permissions, groups_service, audit, rating, maintenance, social, rewards,
+        game_chats=game_chats,
     )
     services.engine = engine  # для корректного dispose при остановке
     return services, timers
@@ -131,6 +137,8 @@ async def create_app() -> tuple[Bot, Dispatcher, Services, TimerManager]:
     dp.callback_query.middleware(services.maintenance)
     dp.message.middleware(GroupContextMiddleware())
     dp.callback_query.middleware(GroupContextMiddleware())
+    # серверная модерация игровых чатов (после контекста группы)
+    dp.message.middleware(GameChatGuardMiddleware())
 
     @dp.errors()
     async def on_error(event: ErrorEvent, exception: Exception):
