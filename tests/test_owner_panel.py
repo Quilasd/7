@@ -391,7 +391,7 @@ async def _fake_edit(cb, text, kb=None):
 
 
 class TestOwnerForumsSection:
-    """Секция 🎮 Форумы: статус форумов и кнопки."""
+    """Секция 🎮 Форумы: глобальные + per-group форумы (ТЗ-11)."""
 
     async def test_forums_screen_renders(self, services, session, monkeypatch):
         owner, _ = await _setup_owner(services, session, monkeypatch)
@@ -402,3 +402,28 @@ class TestOwnerForumsSection:
         assert "Game Forum" in text and "Mafia Forum" in text
         assert "не настроен" in text
         assert "/set_game_forum" in text and "/set_mafia_forum" in text
+
+    async def test_forums_screen_global_and_group(self, services, session, monkeypatch):
+        """Глобальные форумы + секция per-group с форумами группы."""
+        owner, _ = await _setup_owner(services, session, monkeypatch)
+        from bot.services.game_chat import StaticForumProvider
+
+        from bot.database.models import Group, GroupSettingsModel
+        from bot.database.repositories.groups import GroupRepository, GroupSettingsRepository
+
+        group = await GroupRepository(session).get_or_create(-100777, "Форум-группа A")
+        gs = await GroupSettingsRepository(session).get_or_create(group.id)
+        gs.game_forum_chat_id = -111
+        gs.mafia_forum_chat_id = -222
+        await session.commit()
+
+        services.game_chats.forums = StaticForumProvider(-1009001, -1009002)
+        text = await ow._screen_forums(services)
+        # глобальная секция
+        assert "игры вне групп" in text
+        assert "-1009001" in text and "-1009002" in text
+        # per-group секция
+        assert "По группам" in text
+        assert "Форум-группа A" in text
+        assert "-111" in text and "-222" in text
+        assert "никогда не используют форумы другой группы" in text

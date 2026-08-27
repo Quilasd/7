@@ -364,6 +364,10 @@ class GroupSettingsModel(Base):
     warn_limit: Mapped[int] = mapped_column(Integer, default=3)
     warn_expire_hours: Mapped[int] = mapped_column(Integer, default=168)      # 7 дней
     warn_ban_minutes: Mapped[int] = mapped_column(Integer, default=1440)     # 24 часа
+    # 📌 ТЗ-11: форумы партий per-group. Игра группы использует ТОЛЬКО эти
+    # форумы; глобальные env-форумы — fallback исключительно для игр без группы.
+    game_forum_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    mafia_forum_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 

@@ -85,7 +85,8 @@ def build_services(bot: Bot, settings) -> tuple[Services, TimerManager]:
     locks = GameLocks()
     rating = RatingService()
     app_config = AppConfigService(session_factory, settings)
-    # Темы партий: два ПОСТОЯННЫХ форума (env/owner-настройка), темы создаёт бот
+    # Темы партий: форумы PER-GROUP из group_settings (ТЗ-11); глобальные
+    # env/owner-форумы — fallback только для игр без группы (ЛС-комнаты)
     game_chats = GameChatService(
         session_factory,
         TelegramGameChatGateway(bot),

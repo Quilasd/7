@@ -1,12 +1,13 @@
-"""Настройка игровых форумов (Game Forum / Mafia Forum).
+"""Настройка игровых форумов (Game Forum / Mafia Forum) — PER-GROUP (ТЗ-11).
 
-Темы партии создаются БОТОМ автоматически при старте игры в двух постоянных
-форумных чатах (GAME_FORUM_CHAT_ID / MAFIA_FORUM_CHAT_ID) — ручных команд
-на каждую игру больше не нужно (/gamechat и /mafiachat удалены).
+Темы партии создаются БОТОМ автоматически при старте игры в форумных чатах
+ГРУППЫ этой игры. Глобальные env-форумы — только fallback для игр без группы.
 
-Здесь только OWNER-настройка постоянных форумов:
-- /set_game_forum  [chat_id] — выполнить в самом форуме или с аргументом;
-- /set_mafia_forum [chat_id] — аналогично для форума мафии.
+- В ГРУППЕ: <code>/set_game_forum &lt;chat_id&gt;</code> — глобальный Owner или
+  локальный Senior Admin+ (MANAGE_SETTINGS) ЭТОЙ группы; пишет в
+  group_settings группы. Игры группы A никогда не используют форумы группы B.
+- В ЛС (только глобальный Owner): <code>/set_game_forum &lt;chat_id&gt;</code> —
+  настраивает глобальный fallback для игр без группы.
 
 Модерация тем партий — GameChatGuardMiddleware (bot/middlewares).
 """
@@ -24,29 +25,74 @@ logger = logging.getLogger(__name__)
 router = Router(name="game_forums")
 
 
-async def _set_forum(message: Message, session, services, db_user, kind: str) -> None:
+async def _set_forum(message: Message, session, services, db_user, kind: str, group=None) -> None:
     settings = services.settings
-    is_owner = db_user is not None and settings is not None and (
-        db_user.telegram_id in (getattr(settings, "_owners", None) or [])
+    is_owner = (
+        db_user is not None
+        and settings is not None
+        and bool(getattr(settings, "is_owner", lambda _tid: False)(db_user.telegram_id))
     )
-    if not is_owner:
-        await message.answer("⚙️ Настройку форумов может выполнять только владелец бота.")
+    in_group = group is not None
+
+    # ---- права: в группе — owner ИЛИ локальный Senior Admin+ (MANAGE_SETTINGS)
+    if in_group:
+        if not is_owner:
+            from bot.services.permissions import Permission
+
+            access = await services.permissions.resolve(
+                session, message.from_user.id, group.id
+            )
+            if Permission.MANAGE_SETTINGS not in access.permissions:
+                await message.answer(
+                    "⚙️ Настройку форумов группы может выполнять только владелец бота "
+                    "или локальный старший администратор этой группы."
+                )
+                return
+    elif not is_owner:
+        await message.answer("⚙️ Глобальные форумы настраивает только владелец бота.")
         return
 
-    # chat_id: аргумент команды либо чат, в котором она выполнена
+    # ---- chat_id: только аргумент (форум — отдельный чат, не этот)
     parts = (message.text or "").split()
     chat_id = None
     if len(parts) > 1 and parts[1].lstrip("-").isdigit():
         chat_id = int(parts[1])
-    elif message.chat.type in ("group", "supergroup"):
-        chat_id = message.chat.id
     if chat_id is None:
-        await message.answer(
+        where = (
             f"Формат: <code>/{'set_game_forum' if kind == 'game' else 'set_mafia_forum'} "
-            "&lt;chat_id&gt;</code> — или выполните команду в самом форумном чате."
+            "&lt;chat_id форума&gt;</code> — ID форумного чата, темы которого будет "
+            "использовать эта группа."
+            if in_group else
+            f"Формат: <code>/{'set_game_forum' if kind == 'game' else 'set_mafia_forum'} "
+            "&lt;chat_id&gt;</code> — ID форумного чата для игр вне групп."
+        )
+        await message.answer(where)
+        return
+
+    label = "Game Forum" if kind == "game" else "Mafia Forum"
+
+    if in_group:
+        # per-group: пишем в group_settings ЭТОЙ группы
+        from bot.database.repositories.groups import GroupSettingsRepository
+
+        gs = await GroupSettingsRepository(session).get_or_create(group.id)
+        if kind == "game":
+            gs.game_forum_chat_id = chat_id
+        else:
+            gs.mafia_forum_chat_id = chat_id
+        await session.commit()
+        await message.answer(
+            f"⚙️ {label} группы «{group.title or group.id}»: <code>{chat_id}</code>\n\n"
+            "Новые партии этой группы будут создавать темы в этом форуме.\n"
+            "Убедитесь: это супергруппа-форум (включены темы) и бот — администратор "
+            "с правом <b>can_manage_topics</b>."
+        )
+        logger.info(
+            "Группа %s: настроен %s=%s (user %s)", group.id, label, chat_id, db_user.id
         )
         return
 
+    # глобальный fallback (игры без группы)
     app_config = getattr(services, "app_config", None)
     if app_config is None:
         await message.answer("Конфигурация недоступна.")
@@ -62,21 +108,20 @@ async def _set_forum(message: Message, session, services, db_user, kind: str) ->
     forums = await services.game_chats.check_forums()
     info = forums[kind]
     status = "✅ форум доступен" if info["ok"] else f"⚠️ {info.get('error', 'проблема')}"
-    label = "Game Forum" if kind == "game" else "Mafia Forum"
     await message.answer(
-        f"⚙️ {label} настроен: <code>{chat_id}</code>\n{status}\n\n"
+        f"⚙️ {label} настроен (игры вне групп): <code>{chat_id}</code>\n{status}\n\n"
         + ("" if info["ok"] else
            "Убедитесь: это супергруппа-форум (включены темы) и бот — администратор "
            "с правом <b>can_manage_topics</b>.")
     )
-    logger.info("Настроен %s: %s (user %s)", label, chat_id, db_user.id)
+    logger.info("Настроен глобальный %s: %s (user %s)", label, chat_id, db_user.id)
 
 
 @router.message(Command("set_game_forum"))
-async def cmd_set_game_forum(message: Message, session, services, db_user) -> None:
-    await _set_forum(message, session, services, db_user, "game")
+async def cmd_set_game_forum(message: Message, session, services, db_user, group=None) -> None:
+    await _set_forum(message, session, services, db_user, "game", group=group)
 
 
 @router.message(Command("set_mafia_forum"))
-async def cmd_set_mafia_forum(message: Message, session, services, db_user) -> None:
-    await _set_forum(message, session, services, db_user, "mafia")
+async def cmd_set_mafia_forum(message: Message, session, services, db_user, group=None) -> None:
+    await _set_forum(message, session, services, db_user, "mafia", group=group)

@@ -875,14 +875,20 @@ async def cb_debug(callback: CallbackQuery, services) -> None:
 
 
 async def _screen_forums(services) -> str:
-    """🎮 Игровые форумы: статус подключения и подсказки настройки."""
+    """🎮 Игровые форумы: глобальный fallback + per-group форумы (ТЗ-11)."""
     try:
-        forums = await services.game_chats.check_forums()
+        overview = await services.game_chats.forums_overview()
     except Exception:
-        forums = {"game": {"chat_id": None, "ok": False, "error": "сервис недоступен",
-                           "configured": False, "title": ""},
-                  "mafia": {"chat_id": None, "ok": False, "error": "сервис недоступен",
-                            "configured": False, "title": ""}}
+        overview = {
+            "global": {
+                "game": {"chat_id": None, "ok": False, "error": "сервис недоступен",
+                         "configured": False, "title": ""},
+                "mafia": {"chat_id": None, "ok": False, "error": "сервис недоступен",
+                          "configured": False, "title": ""},
+            },
+            "groups": [],
+        }
+    forums = overview.get("global", {})
 
     def _line(label: str, info: dict) -> list[str]:
         cid = info.get("chat_id")
@@ -895,20 +901,38 @@ async def _screen_forums(services) -> str:
             status = f"🔴 {info.get('error', 'недоступен')}"
         return [f"{label}: {status}", f"    Chat ID: <code>{cid if cid else '—'}</code>"]
 
-    lines = ["🎮 <b>ИГРОВЫЕ ФОРУМЫ</b>", ""]
-    lines += _line("🎮 Game Forum", forums["game"])
+    lines = [
+        "🎮 <b>ИГРОВЫЕ ФОРУМЫ</b>", "",
+        "<b>🌐 Глобальные</b> <i>(игры вне групп)</i>:", "",
+    ]
+    lines += _line("🎮 Game Forum", forums.get("game", {}))
     lines.append("")
-    lines += _line("🌙 Mafia Forum", forums["mafia"])
+    lines += _line("🌙 Mafia Forum", forums.get("mafia", {}))
+
+    lines += ["", "<b>🏠 По группам</b> <i>(игры групп — только свои форумы)</i>:"]
+    group_rows = overview.get("groups", [])
+    if not group_rows:
+        lines.append("⚪ Ни у одной группы не настроены форумы.")
+    for row in group_rows:
+        lines.append("")
+        lines.append(f"🏠 <b>{esc(row.get('title') or '')}</b> <i>(id {row.get('group_id')})</i>")
+        lines += _line("    🎮 Game", row.get("game", {}))
+        lines += _line("    🌙 Mafia", row.get("mafia", {}))
+
     lines += [
         "",
         "Темы партий создаются автоматически при старте игры.",
-        "Настройка (OWNER):",
-        "• <code>/set_game_forum</code> — в самом чате форума или с chat_id;",
-        "• <code>/set_mafia_forum</code> — аналогично для форума мафии.",
+        "Настройка:",
+        "• в группе: <code>/set_game_forum &lt;chat_id&gt;</code> /",
+        "  <code>/set_mafia_forum &lt;chat_id&gt;</code> — Owner или старший админ",
+        "  группы; форумы пишутся в настройки ЭТОЙ группы;",
+        "• в ЛС (только Owner): те же команды — глобальные форумы",
+        "  для игр вне групп.",
         "",
-        "Бот должен быть администратором обоих форумов",
+        "Бот должен быть администратором форумов",
         "с правом <b>can_manage_topics</b>.",
         "",
+        "Игры группы никогда не используют форумы другой группы.",
         "Без форумов игры идут полностью в ЛС с ботом.",
     ]
     return "\n".join(lines)

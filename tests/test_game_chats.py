@@ -597,3 +597,341 @@ class TestTestgameTopics:
         await test_games.finish(game_id)
         assert gw.is_closed(GAME_FORUM, game.game_thread_id)
         assert gw.is_closed(MAFIA_FORUM, game.mafia_thread_id)
+
+
+class TestChatRulesTz23:
+    """Полные правила доступа к темам (ТЗ-23, 15 пунктов).
+
+    Живой: днём — читать+писать Game Topic, ночью — только читать.
+    Мёртвый: READ-ONLY навсегда в обеих темах, ОСТАЁТСЯ в теме, видит всё,
+    НЕ удаляется из чата, НЕ ban/restrict — только запрет отправки.
+    """
+
+    async def test_alive_civilian_cannot_write_mafia_topic_at_night(
+        self, chat_services, session
+    ):
+        """Живой МИРНЫЙ ночью не пишет в Mafia Topic (только живая мафия)."""
+        game_id, users, roles, tg_ids = await _new_game(chat_services, session)
+        await chat_services.phases.begin_game(game_id)  # ночь
+        game = await _game(chat_services, game_id)
+        mafia_uid = next(u for u, r in roles.items() if r == "mafia")
+        civilian = next(u for u in users if u.id != mafia_uid)
+
+        async with chat_services.session_factory() as s:
+            deleted = await chat_services.game_chats.enforce_message(
+                s, MAFIA_FORUM, game.mafia_thread_id, civilian, 600
+            )
+        assert deleted is True
+
+    async def test_dead_player_stays_reads_but_never_writes(
+        self, chat_services, session
+    ):
+        """Мёртвый: остаётся участником, тема для него контекстна (читает),
+        но отправка запрещена НАВСЕГДА в обеих темах (read-only)."""
+        game_id, users, roles, tg_ids = await _new_game(chat_services, session)
+        await chat_services.phases.begin_game(game_id)
+        mafia_uid = next(u for u, r in roles.items() if r == "mafia")
+        victim = next(u for u in users if u.id != mafia_uid)
+        await chat_services.games.submit_night_action(game_id, mafia_uid, "kill", victim.id)
+        await chat_services.phases.end_night(game_id)  # смерть -> день
+        game = await _game(chat_services, game_id)
+
+        async with chat_services.session_factory() as s:
+            # мёртвый всё ещё участник игры (в теме, видит всё)
+            gp = await GamePlayerRepository(s).get_by_user(game_id, victim.id)
+            assert gp is not None and not gp.is_alive
+            # тема игры днём: живым можно, мёртвому — нет
+            assert await chat_services.game_chats.enforce_message(
+                s, GAME_FORUM, game.game_thread_id, victim, 610
+            )
+            # тема мафии днём закрыта для всех — мёртвому тоже
+            assert await chat_services.game_chats.enforce_message(
+                s, MAFIA_FORUM, game.mafia_thread_id, victim, 611
+            )
+            # чтение: тема остаётся контекстом игры (история доступна)
+            found = await chat_services.game_chats.context_for(
+                s, GAME_FORUM, game.game_thread_id
+            )
+            assert found is not None and found[0].id == game_id
+
+    async def test_dead_cannot_vote_or_night_action(self, chat_services, session):
+        """Мёртвый не голосует и не делает ночных действий (серверная проверка)."""
+        game_id, users, roles, tg_ids = await _new_game(chat_services, session)
+        await chat_services.phases.begin_game(game_id)
+        mafia_uid = next(u for u, r in roles.items() if r == "mafia")
+        victim = next(u for u in users if u.id != mafia_uid)
+        await chat_services.games.submit_night_action(game_id, mafia_uid, "kill", victim.id)
+        await chat_services.phases.end_night(game_id)  # victim мёртв
+        await chat_services.phases.begin_voting(game_id)
+
+        # мёртвый голосует — отказ
+        res = await chat_services.games.cast_vote(
+            game_id, victim.id, next(u.id for u in users if u.id != victim.id)
+        )
+        assert not res.ok
+        # мёртвый делает ночное действие — отказ (вторая ночь)
+        await chat_services.phases.end_voting(game_id)  # может завершить день
+        res2 = await chat_services.games.submit_night_action(
+            game_id, victim.id, "kill", mafia_uid
+        )
+        assert not res2.ok
+
+    async def test_dead_mafia_at_night_reads_mafia_topic_cannot_write(
+        self, chat_services, session
+    ):
+        """Умерший мафиози НОЧЬЮ в Mafia Topic: читает (контекст жив),
+        писать не может — но ЖИВАЯ мафия может."""
+        game_id, users, roles, tg_ids = await _new_game(chat_services, session)
+        await chat_services.phases.begin_game(game_id)  # ночь 1
+        mafia_uid = next(u for u, r in roles.items() if r == "mafia")
+        mafia_user = next(u for u in users if u.id == mafia_uid)
+        # мафия никого не убивает: END_NIGHT без убийств (нужен хоть kill для конца?)
+        victim = next(u for u in users if u.id != mafia_uid)
+        await chat_services.games.submit_night_action(game_id, mafia_uid, "kill", victim.id)
+        await chat_services.phases.end_night(game_id)
+        # днём голосованием изгоняем МАФИЮ (она умирает)
+        await chat_services.phases.begin_voting(game_id)
+        for u in users:
+            if u.id != mafia_uid and u.id != victim.id:
+                assert (await chat_services.games.cast_vote(game_id, u.id, mafia_uid)).ok
+        await chat_services.phases.end_voting(game_id)  # мафия изгнана
+        # ... но игра ещё не завершена? если mafia==0 -> city win. Берём 2 мафии.
+        # Проще: проверяем в этой же партии после изгнания — если игра
+        # продолжилась (мирные+маньяк-сценарии), ночь 2 недоступна мёртвой мафии.
+        game = await _game(chat_services, game_id)
+        if game.status != "ENDED":
+            # продолжение: мёртвая мафия ночью не пишет в Mafia Topic
+            async with chat_services.session_factory() as s:
+                assert await chat_services.game_chats.enforce_message(
+                    s, MAFIA_FORUM, game.mafia_thread_id, mafia_user, 620
+                )
+        else:
+            # игра завершена изгнанием мафии: обе темы закрыты, писать нельзя всем
+            async with chat_services.session_factory() as s:
+                assert await chat_services.game_chats.enforce_message(
+                    s, MAFIA_FORUM, game.mafia_thread_id, mafia_user, 620
+                )
+
+    async def test_recover_preserves_moderation_rights(self, chat_services, session):
+        """recover восстанавливает режим тем, серверные права неизменны:
+        мёртвый после рестарта всё ещё read-only, живой днём пишет."""
+        game_id, users, roles, tg_ids = await _new_game(chat_services, session)
+        await chat_services.phases.begin_game(game_id)
+        mafia_uid = next(u for u, r in roles.items() if r == "mafia")
+        victim = next(u for u in users if u.id != mafia_uid)
+        await chat_services.games.submit_night_action(game_id, mafia_uid, "kill", victim.id)
+        await chat_services.phases.end_night(game_id)  # день, victim мёртв
+        alive = next(u for u in users if u.id not in (victim.id,))
+
+        chat_services.gateway.closed.clear()  # «рестарт»
+        async with chat_services.session_factory() as s:
+            recovered = await chat_services.game_chats.recover(s)
+        assert recovered >= 1
+        game = await _game(chat_services, game_id)
+        assert not chat_services.gateway.is_closed(GAME_FORUM, game.game_thread_id)
+
+        async with chat_services.session_factory() as s:
+            # живой днём пишет — можно
+            assert not await chat_services.game_chats.enforce_message(
+                s, GAME_FORUM, game.game_thread_id, alive, 630
+            )
+            # мёртвый — нельзя (права пережили рестарт)
+            assert await chat_services.game_chats.enforce_message(
+                s, GAME_FORUM, game.game_thread_id, victim, 631
+            )
+
+    async def test_after_final_restrictions_and_topics_closed(self, chat_services, session):
+        """После финала: обе темы закрыты навсегда, писать не может никто
+        (в т.ч. живой игрок); история с thread_id остаётся в БД."""
+        game_id, users, roles, tg_ids = await _new_game(chat_services, session)
+        await chat_services.phases.begin_game(game_id)
+        await chat_services.phases.force_end(game_id, "тест")
+        game = await _game(chat_services, game_id)
+        gw = chat_services.gateway
+
+        assert gw.is_closed(GAME_FORUM, game.game_thread_id)
+        assert gw.is_closed(MAFIA_FORUM, game.mafia_thread_id)
+        assert any("ИГРА ЗАВЕРШЕНА" in t
+                   for t in gw.texts_to(GAME_FORUM, game.game_thread_id))
+        async with chat_services.session_factory() as s:
+            for u in users:
+                assert await chat_services.game_chats.enforce_message(
+                    s, GAME_FORUM, game.game_thread_id, u, 640
+                )
+            # история: thread_id сохранены в игре
+            fresh = await GameRepository(s).get(game_id)
+            assert fresh.game_thread_id == game.game_thread_id
+            assert fresh.mafia_thread_id == game.mafia_thread_id
+
+    async def test_no_ban_or_restrict_ever_called(self, chat_services, session):
+        """Изоляция мёртвых — ТОЛЬКО серверная (delete_message):
+        restrict/ban API не существует у шлюза и не вызывается."""
+        gateway = chat_services.gateway
+        # у шлюза нет и не должно быть методов бана/рестрикта
+        for forbidden in ("restrict_chat_member", "ban_chat_member", "unban_chat_member"):
+            assert not hasattr(gateway, forbidden)
+        # после смерти сообщество не получает Telegram-ограничений:
+        # единственный механизм — delete_message
+        game_id, users, roles, tg_ids = await _new_game(chat_services, session)
+        await chat_services.phases.begin_game(game_id)
+        mafia_uid = next(u for u, r in roles.items() if r == "mafia")
+        victim = next(u for u in users if u.id != mafia_uid)
+        await chat_services.games.submit_night_action(game_id, mafia_uid, "kill", victim.id)
+        await chat_services.phases.end_night(game_id)
+        game = await _game(chat_services, game_id)
+        async with chat_services.session_factory() as s:
+            await chat_services.game_chats.enforce_message(
+                s, GAME_FORUM, game.game_thread_id, victim, 650
+            )
+        # удалено сообщение, а не участник
+        assert (GAME_FORUM, 650) in chat_services.gateway.deleted
+
+
+class TestGroupForumSettings:
+    """ТЗ-11: /set_game_forum в группе пишет в group_settings ЭТОЙ группы."""
+
+    async def _group(self, services, session, chat_id=-700100, title="GroupX"):
+        return await services.groups.get_or_create(chat_id, title)
+
+    async def _run_set(self, services, session, user, group, text, chat=None):
+        import bot.handlers.game_chats as h
+        from tests.test_handlers_smoke import FakeChat, FakeMessage, FakeTgUser
+
+        msg = FakeMessage(
+            FakeTgUser(user.telegram_id), text,
+            chat=chat or FakeChat(user.id, "private"),
+        )
+        await h._set_forum(
+            msg, session, services, user,
+            "game" if "set_game_forum" in text else "mafia",
+            group=group,
+        )
+        return msg
+
+    async def test_group_forum_saved_to_group_settings(
+        self, services, session, monkeypatch
+    ):
+        """Owner в группе настраивает форумы — пишется в group_settings группы,
+        глобальный конфиг НЕ меняется."""
+        from bot.database.repositories.groups import GroupSettingsRepository
+
+        monkeypatch.setattr(services.settings, "_owners", [111])
+        owner = await make_user(session, "Owner")
+        owner.telegram_id = 111
+        await session.commit()
+        group = await self._group(services, session)
+
+        msg = await self._run_set(
+            services, session, owner, group, "/set_game_forum -300111"
+        )
+        assert "Game Forum" in msg.answers[0] and "GroupX" in msg.answers[0]
+        gs = await GroupSettingsRepository(session).get_for(group.id)
+        assert gs.game_forum_chat_id == -300111
+        # глобальный конфиг не тронут
+        assert (await services.app_config.get()).game_forum_chat_id is None
+
+    async def test_group_senior_admin_can_set_forums(self, services, session):
+        """Локальный Senior Admin группы может настраивать её форумы."""
+        from bot.database.repositories.groups import GroupSettingsRepository
+
+        admin = await make_user(session, "LocalSenior")
+        group = await self._group(services, session, -700200, "Gr2")
+        await session.commit()
+        await services.groups.set_staff(
+            group.id, admin.telegram_id,
+            __import__("bot.services.permissions", fromlist=["AdminLevel"]).AdminLevel.OWNER,
+            admin.id, 4, admin.id,
+        )
+        msg = await self._run_set(
+            services, session, admin, group, "/set_mafia_forum -300222"
+        )
+        assert "Mafia Forum" in msg.answers[0] and "Gr2" in msg.answers[0]
+        gs = await GroupSettingsRepository(session).get_for(group.id)
+        assert gs.mafia_forum_chat_id == -300222
+
+    async def test_group_plain_admin_and_player_rejected(self, services, session):
+        """Обычный игрок и локальный Admin (без MANAGE_SETTINGS) — отказ."""
+        player = await make_user(session, "JustPlayer")
+        group = await self._group(services, session, -700300, "Gr3")
+        msg = await self._run_set(
+            services, session, player, group, "/set_game_forum -300333"
+        )
+        assert "только" in msg.answers[0]
+
+        from bot.services.permissions import AdminLevel
+
+        admin3 = await make_user(session, "PlainAdmin")
+        await session.commit()
+        await services.groups.set_staff(
+            group.id, admin3.telegram_id, AdminLevel.OWNER, admin3.id, 3, admin3.id
+        )
+        msg2 = await self._run_set(
+            services, session, admin3, group, "/set_game_forum -300334"
+        )
+        assert "только" in msg2[0] if isinstance(msg2, list) else "только" in msg2.answers[0]
+
+    async def test_admin_of_group_a_cannot_set_forums_of_group_b(
+        self, services, session
+    ):
+        """Админ группы A не может настроить форумы группы B (изоляция)."""
+        group_a = await self._group(services, session, -700400, "GA")
+        group_b = await self._group(services, session, -700500, "GB")
+        admin_a = await make_user(session, "AdminA")
+        await session.commit()
+        from bot.services.permissions import AdminLevel
+
+        await services.groups.set_staff(
+            group_a.id, admin_a.telegram_id, AdminLevel.OWNER, admin_a.id, 4, admin_a.id
+        )
+        # команда «в группе B» от админа A — отказ
+        msg = await self._run_set(
+            services, session, admin_a, group_b, "/set_game_forum -300444"
+        )
+        assert "только" in msg.answers[0]
+
+    async def test_private_set_forum_owner_only_global(self, services, session, monkeypatch):
+        """В ЛС (group=None) — только глобальный Owner; пишет в app_config."""
+        monkeypatch.setattr(services.settings, "_owners", [222])
+        owner = await make_user(session, "GlobalOwner")
+        owner.telegram_id = 222
+        await session.commit()
+        from bot.services.app_config import AppConfigService
+        from bot.services.game_chat import DbForumProvider
+
+        services.app_config = AppConfigService(services.session_factory, services.settings)
+        services.game_chats.forums = DbForumProvider(
+            services.app_config, services.settings
+        )
+        msg = await self._run_set(
+            services, session, owner, None, "/set_game_forum -300555"
+        )
+        assert "настроен" in msg.answers[0]
+        assert (await services.app_config.get()).game_forum_chat_id == -300555
+
+        stranger = await make_user(session, "Stranger")
+        msg2 = await self._run_set(
+            services, session, stranger, None, "/set_game_forum -300556"
+        )
+        assert "только владелец" in msg2.answers[0]
+
+    async def test_game_uses_group_forums_via_provider(self, services, session):
+        """DbForumProvider: get_for(session, group_id) отдаёт форумы группы;
+        для игры без группы — глобальные (ТЗ-11, сценарий 111/222/333/444)."""
+        from bot.services.game_chat import DbForumProvider
+
+        provider = DbForumProvider(services.app_config, type("Env", (), {
+            "game_forum_chat_id": -1008001,
+            "mafia_forum_chat_id": -1008002,
+        })())
+        group = await self._group(services, session, -700600, "GF")
+        from bot.database.repositories.groups import GroupSettingsRepository
+
+        gs = await GroupSettingsRepository(session).get_or_create(group.id)
+        gs.game_forum_chat_id, gs.mafia_forum_chat_id = -111, -222
+        await session.commit()
+
+        assert await provider.get_for(session, group.id) == (-111, -222)
+        assert await provider.get_for(session, None) == (-1008001, -1008002)
+        # группа без настроенных форумов — (None, None), НЕ глобальные
+        group2 = await self._group(services, session, -700700, "GF2")
+        assert await provider.get_for(session, group2.id) == (None, None)

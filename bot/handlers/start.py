@@ -107,7 +107,7 @@ def _active_game_kb(game_id: int) -> InlineKeyboardMarkup:
 
 @router.callback_query(MenuCB.filter(F.action == "play"))
 @router.callback_query(MenuCB.filter(F.action == "find"))
-async def cb_play(callback: CallbackQuery, session, db_user) -> None:
+async def cb_play(callback: CallbackQuery, session, db_user, group=None) -> None:
     await callback.answer()
     players = GamePlayerRepository(session)
 
@@ -121,17 +121,30 @@ async def cb_play(callback: CallbackQuery, session, db_user) -> None:
         return
 
     rooms = RoomRepository(session)
-    open_rooms = await rooms.open_public_rooms(10)
+    # Изоляция групп (ТЗ): в группе — только комнаты ЭТОЙ группы,
+    # в ЛС — только глобальные комнаты (без группы).
+    if group is not None:
+        open_rooms = await rooms.for_group(group.id)
+    else:
+        open_rooms = await rooms.open_public_rooms(10)
     my_room = await rooms.open_room_of_user(db_user.id)
     if not open_rooms and my_room is None:
         await edit_or_answer(
             callback,
-            "🔎 Открытых публичных комнат нет.\n\nСоздай свою — «🏠 Создать комнату»!",
+            (
+                f"🔎 Открытых комнат в группе «{esc(group.title or '')}» нет."
+                if group is not None else
+                "🔎 Открытых публичных комнат нет.\n\nСоздай свою — «🏠 Создать комнату»!"
+            ),
             back_to_menu_kb(),
         )
         return
 
-    lines = ["🔎 <b>ОТКРЫТЫЕ КОМНАТЫ</b>", ""]
+    if group is not None:
+        title = f"🔎 <b>КОМНАТЫ ГРУППЫ</b> · <i>{esc(group.title or '')}</i>"
+    else:
+        title = "🔎 <b>ОТКРЫТЫЕ КОМНАТЫ</b>"
+    lines = [title, ""]
     for room in open_rooms:
         lock = "🔐" if room.is_private else "🌍"
         lines.append(

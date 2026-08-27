@@ -309,10 +309,10 @@ async def cb_to_menu(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(RoomCB.filter(F.action == "find_refresh"))
-async def cb_find_refresh(callback: CallbackQuery, session, db_user) -> None:
+async def cb_find_refresh(callback: CallbackQuery, session, db_user, group=None) -> None:
     from bot.handlers.start import cb_play
 
-    await cb_play(callback, session, db_user)
+    await cb_play(callback, session, db_user, group=group)
 
 
 # -------------------------------------------------------------------- вход

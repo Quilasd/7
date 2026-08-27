@@ -2,12 +2,19 @@
 
 АРХИТЕКТУРА (4 уровня, не смешиваются):
 - 🏠 основная группа — обычное сообщество, без игровых сообщений;
-- 🎮 Game Forum (ПОСТОЯННЫЙ форумный чат) → тема «🎮 Игра #N — <room>»
-  на каждую партию: общение живых игроков днём, анонсы фаз; ночью закрыта;
-- 🌙 Mafia Forum (ПОСТОЯННЫЙ форумный чат) → тема «🌙 Игра #N — <room>»
+- 🎮 Game Forum (ПОСТОЯННЫЙ форумный чат ГРУППЫ, ТЗ-11) → тема
+  «🎮 Игра #N — <room>» на каждую партию: общение живых игроков днём,
+  анонсы фаз; ночью закрыта;
+- 🌙 Mafia Forum (ПОСТОЯННЫЙ форумный чат ГРУППЫ) → тема «🌙 Игра #N — <room>»
   на каждую партию: общение ЖИВОЙ мафии ночью; днём закрыта;
 - 🤖 ЛС с ботом — роли, ночные действия, дневное голосование (кнопки
   в темы НЕ переносятся).
+
+ФОРУМЫ PER-GROUP (ТЗ-11): каждая группа настраивает свою пару форумов в
+group_settings (game_forum_chat_id / mafia_forum_chat_id, миграция 0009).
+Игра группы использует ТОЛЬКО форумы своей группы — глобальные
+GAME_FORUM_CHAT_ID/MAFIA_FORUM_CHAT_ID остаются fallback-ом исключительно
+для игр БЕЗ группы (комнаты из личного чата с ботом).
 
 Контекст темы = (chat_id форума, message_thread_id) — уникален для игры,
 параллельные партии изолированы даже внутри одного форума.
@@ -171,25 +178,54 @@ class NoopGameChatGateway:
         return None
 
 
+class ForumProvider(Protocol):
+    """Резолвер форумов партии по группе игры (ТЗ-11).
+
+    get_for(session, group_id) -> (game_forum, mafia_forum):
+    - group_id не None — форумы ИЗ group_settings ЭТОЙ группы (никаких
+      глобальных fallback: группа A никогда не использует форумы группы B
+      и глобальные env-форумы);
+    - group_id None (игра без группы, ЛС-комнаты) — глобальные форумы
+      (owner-настройка поверх .env).
+    """
+
+    async def get_for(
+        self, session, group_id: int | None
+    ) -> tuple[int | None, int | None]: ...
+
+
 class StaticForumProvider:
-    """Постоянные форумы из конфигурации (для тестов — фиксированные ID)."""
+    """Глобальные форумы из конфигурации (для тестов — фиксированные ID).
+
+    Игра БЕЗ группы получает эту пару; игры групп получают (None, None) —
+    per-group форумы в тестах настраиваются в group_settings.
+    """
 
     def __init__(self, game_forum: int | None, mafia_forum: int | None) -> None:
         self.game_forum = game_forum
         self.mafia_forum = mafia_forum
 
-    async def get(self) -> tuple[int | None, int | None]:
-        return self.game_forum, self.mafia_forum
+    async def get_for(
+        self, session, group_id: int | None
+    ) -> tuple[int | None, int | None]:
+        if group_id is None:
+            return self.game_forum, self.mafia_forum
+        return None, None
 
 
 class DbForumProvider:
-    """Форумы: override из БД (owner-настройка) иначе .env."""
+    """Форумы: для игры группы — group_settings этой группы; для игры без
+    группы — глобальные (owner-настройка из БД поверх .env).
+
+    ТЗ-11: глобальные env-форумы НЕ источник для игр групп — только fallback
+    игр без группы.
+    """
 
     def __init__(self, app_config, env_settings) -> None:
         self.app_config = app_config
         self.env_settings = env_settings
 
-    async def get(self) -> tuple[int | None, int | None]:
+    async def _global(self) -> tuple[int | None, int | None]:
         try:
             gs = await self.app_config.get()
             return (
@@ -204,6 +240,27 @@ class DbForumProvider:
                 getattr(self.env_settings, "game_forum_chat_id", None),
                 getattr(self.env_settings, "mafia_forum_chat_id", None),
             )
+
+    async def get_for(
+        self, session, group_id: int | None
+    ) -> tuple[int | None, int | None]:
+        if group_id is None:
+            return await self._global()
+        # per-group: только group_settings этой группы, БЕЗ глобального fallback
+        try:
+            from bot.database.repositories.groups import GroupSettingsRepository
+
+            settings = (
+                await GroupSettingsRepository(session).get_for(group_id)
+                if session is not None
+                else None
+            )
+        except Exception:
+            logger.warning("GameChat: не удалось прочитать форумы группы %s", group_id)
+            return None, None
+        if settings is None:
+            return None, None
+        return settings.game_forum_chat_id, settings.mafia_forum_chat_id
 
 
 # ------------------------------------------------------------------ service
@@ -232,12 +289,17 @@ class GameChatService:
     async def on_game_started(self, session, game: Game, players) -> None:
         """Старт партии: автоматически создать обе темы (без ручных команд).
 
-        Игрокам НЕ нужен отдельный доступ — они уже участники форума; тема
-        просто появляется. Если форумы не настроены — тихо пропускаем.
+        Форумы резолвятся ПО ГРУППЕ игры (ТЗ-11): group_settings группы,
+        для игры без группы — глобальные. Игрокам НЕ нужен отдельный доступ —
+        они уже участники форума; тема просто появляется. Если форумы не
+        настроены — тихо пропускаем.
         """
-        game_forum, mafia_forum = await self.forums.get()
+        game_forum, mafia_forum = await self._forums_for(session, game.group_id)
         if not game_forum and not mafia_forum:
-            logger.info("Игра %s: форумные чаты не настроены — темы не создаются", game.id)
+            logger.info(
+                "Игра %s: форумы не настроены (группа %s) — темы не создаются",
+                game.id, game.group_id,
+            )
             return
 
         room_name = await self._room_name(session, game)
@@ -466,9 +528,18 @@ class GameChatService:
 
     # ------------------------------------------------------------ форумы
 
+    async def _forums_for(
+        self, session, group_id: int | None
+    ) -> tuple[int | None, int | None]:
+        """Пара форумов для игры с данной группой (через провайдер)."""
+        getter = getattr(self.forums, "get_for", None)
+        if getter is not None:
+            return await getter(session, group_id)
+        return await self.forums.get()  # legacy-провайдер без группы
+
     async def check_forums(self) -> dict:
-        """Проверка подключения форумов (для /owner)."""
-        game_forum, mafia_forum = await self.forums.get()
+        """Проверка подключения ГЛОБАЛЬНЫХ форумов — fallback игр без группы."""
+        game_forum, mafia_forum = await self._forums_for(None, None)
 
         async def _check(chat_id):
             if not chat_id:
@@ -487,6 +558,58 @@ class GameChatService:
             "game": {"chat_id": game_forum, **await _check(game_forum)},
             "mafia": {"chat_id": mafia_forum, **await _check(mafia_forum)},
         }
+
+    async def forums_overview(self) -> dict:
+        """Глобальные форумы + per-group форумы всех групп (для /owner).
+
+        Возвращает:
+        {
+          "global": {"game": {...}, "mafia": {...}},          # check_forums()
+          "groups": [{"group_id", "title", "game": {...}, "mafia": {...}}, ...]
+        }
+        """
+        from bot.database.models import GroupSettingsModel
+        from bot.database.repositories.groups import GroupRepository
+
+        async def _check(chat_id):
+            if not chat_id:
+                return {"configured": False, "ok": False, "error": "не задан"}
+            info = await self.gateway.chat_info(chat_id)
+            if info is None:
+                return {"configured": True, "ok": False, "error": "бот не имеет доступа"}
+            if not info.get("is_forum"):
+                return {
+                    "configured": True, "ok": False, "title": info.get("title", ""),
+                    "error": "чат не является форумом (нужна супергруппа с темами)",
+                }
+            return {"configured": True, "ok": True, "title": info.get("title", ""), "error": ""}
+
+        result: dict = {"global": await self.check_forums(), "groups": []}
+        try:
+            async with self.session_factory() as session:
+                stmt = select(GroupSettingsModel).where(
+                    (GroupSettingsModel.game_forum_chat_id.isnot(None))
+                    | (GroupSettingsModel.mafia_forum_chat_id.isnot(None))
+                )
+                rows = list((await session.execute(stmt)).scalars().all())
+                groups_repo = GroupRepository(session)
+                for gs in rows:
+                    group = await groups_repo.get(gs.group_id)
+                    result["groups"].append({
+                        "group_id": gs.group_id,
+                        "title": group.title if group else f"Группа {gs.group_id}",
+                        "game": {
+                            "chat_id": gs.game_forum_chat_id,
+                            **await _check(gs.game_forum_chat_id),
+                        },
+                        "mafia": {
+                            "chat_id": gs.mafia_forum_chat_id,
+                            **await _check(gs.mafia_forum_chat_id),
+                        },
+                    })
+        except Exception:
+            logger.warning("GameChat: не удалось собрать per-group форумы")
+        return result
 
     # ------------------------------------------------------------ внутренние
 

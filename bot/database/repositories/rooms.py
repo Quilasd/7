@@ -18,9 +18,18 @@ class RoomRepository(BaseRepository[Room]):
         return result.scalar_one_or_none()
 
     async def open_public_rooms(self, limit: int = 10) -> list[Room]:
+        """Публичные комнаты БЕЗ группы — глобальный список для ЛС.
+
+        Комнаты групп (group_id не None) сюда НЕ попадают: они видны только
+        внутри своей группы (for_group) — изоляция Group A / Group B.
+        """
         result = await self.session.execute(
             select(Room)
-            .where(Room.status == RoomStatus.OPEN.value, Room.is_private.is_(False))
+            .where(
+                Room.status == RoomStatus.OPEN.value,
+                Room.is_private.is_(False),
+                Room.group_id.is_(None),
+            )
             .order_by(Room.created_at.desc())
             .limit(limit)
         )
