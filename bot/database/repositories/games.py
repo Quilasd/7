@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
 
 from bot.database.models import Game, GamePlayer, GameStatus, PlayerStatus
 from bot.database.repositories.base import BaseRepository
@@ -116,8 +117,11 @@ class GamePlayerRepository(BaseRepository[GamePlayer]):
         return result.scalars().unique().one_or_none()
 
     async def history_for_user(self, user_id: int, limit: int = 10, offset: int = 0) -> list[GamePlayer]:
+        # selectinload обязателен: доступ к gp.game (история/профиль) без него
+        # требует ленивой загрузки, которая в async-сессии падает MissingGreenlet
         result = await self.session.execute(
             select(GamePlayer)
+            .options(selectinload(GamePlayer.game))
             .join(Game, Game.id == GamePlayer.game_id)
             .where(GamePlayer.user_id == user_id, Game.status == GameStatus.ENDED.value)
             .order_by(Game.ended_at.desc())

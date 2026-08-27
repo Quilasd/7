@@ -397,6 +397,15 @@ class PhaseManager:
         win: WinResult | None,
         reason: str | None = None,
     ) -> None:
+        if game.status == GameStatus.ENDED.value:
+            # защита от двойного финала: повторный вызов не должен повторно
+            # начислять статистику/XP/достижения (идемпотентность)
+            logger.warning(
+                "Игра %s: _end_game вызван повторно (уже ENDED) — финализация пропущена",
+                game.id,
+            )
+            return
+        logger.info("GAME FINISH START: игра %s", game.id)
         game.status = GameStatus.ENDED.value
         game.ended_at = utcnow()
         game.phase_deadline = None
@@ -497,6 +506,11 @@ class PhaseManager:
         if test_mode and not (apply_global or apply_local):
             logger.info("Игра %s: тестовый режим — статистика не обновляется", game.id)
         await session.commit()
+        if apply_global or apply_local:
+            logger.info(
+                "STATS UPDATED: игра %s (global=%s, local=%s, победителей=%s)",
+                game.id, apply_global, apply_local, len(winner_ids),
+            )
 
         # --- Достижения, титулы и финал предсмертных записок -----------------
         by_id = {p.user_id: p for p in players}
@@ -535,6 +549,10 @@ class PhaseManager:
                 wins_before=wins_before, win_streak_after=win_streak_after,
             )
             newly_awarded = await rw.award_achievements(session, ach.evaluate(ctx))
+            logger.info(
+                "ACHIEVEMENTS EVALUATED: игра %s, новых наград: %s",
+                game.id, sum(len(v) for v in newly_awarded.values()),
+            )
 
         # опубликовать оставшиеся неопубликованные записки (чтобы не потерять)
         for note in await DeathNoteRepository(session).unpublished(game.id):
@@ -603,7 +621,7 @@ class PhaseManager:
                 personal = personal + "\n" + "\n".join(lines)
             await self._send(gp.user.telegram_id, f"{overview}\n\n———\n{personal}")
         logger.info(
-            "Игра %s завершена: победитель=%s%s (global=%s, local=%s)",
+            "GAME FINISH COMPLETE: игра %s, победитель=%s%s (global=%s, local=%s)",
             game.id, game.winner, " (тест)" if test_mode else "", apply_global, apply_local,
         )
 
