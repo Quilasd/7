@@ -57,6 +57,7 @@ USER_COMMANDS: list[BotCommand] = [
 
 #: Короткий список для групповых чатов (в группе меню «/» тоже доступно)
 GROUP_COMMANDS: list[BotCommand] = [
+    BotCommand(command="setup", description="🔧 Настройка сервера (админам)"),
     BotCommand(command="top", description="🏆 Рейтинг этой группы"),
     BotCommand(command="stats", description="📊 Моя статистика"),
     BotCommand(command="group_stats", description="🏠 Статистика группы"),

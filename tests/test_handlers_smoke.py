@@ -243,7 +243,8 @@ class TestSettingsCommand:
         msg = FakeMessage(FakeTgUser(boss.telegram_id), "/settings",
                           chat=FakeChat(group.telegram_chat_id))
         await ga.cmd_settings(msg, session=session, group=group, services=services)
-        assert any("НАСТРОЙКИ ГРУППЫ" in t for t in msg.answers)
+        assert any("НАСТРОЙКИ MAFIA ONLINE" in t for t in msg.answers)
+        assert any("Не настроен" in t for t in msg.answers)  # /setup ещё не выполнен
         assert msg.keyboards[0] is not None
 
     async def test_settings_private_chat_rejected(self, services, session):

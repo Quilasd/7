@@ -130,3 +130,9 @@ class SocialCB(CallbackData, prefix="soc"):
 
     action: str   # friends | requests | favorites | ignored | rewards | accept | decline | ...
     value: str = ""
+
+
+class SetupCB(CallbackData, prefix="setup"):
+    """Первоначальная настройка сервера (/setup, кнопка «Проверить настройку»)."""
+
+    action: str  # check

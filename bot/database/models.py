@@ -368,6 +368,10 @@ class GroupSettingsModel(Base):
     # форумы; глобальные env-форумы — fallback исключительно для игр без группы.
     game_forum_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     mafia_forum_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # 📌 Первичная настройка сервера (/setup): время последнего успешного
+    # прохождения проверки (бот-админ, can_manage_topics, форумные темы).
+    # NULL = группа ещё не настроена (базовая функциональность работает).
+    setup_completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 

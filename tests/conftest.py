@@ -20,6 +20,7 @@ from bot.services.phase_manager import GameLocks, PhaseManager
 from bot.services.rating import RatingService
 from bot.services.rooms import RoomService
 from bot.services.rewards import RewardService
+from bot.services.setup import GroupSetupService
 from bot.services.social import SocialService
 from bot.services.test_game import TestGameManager
 from bot.services.timer_manager import NoopTimerManager
@@ -122,6 +123,7 @@ async def services(session_factory, notifier):
     container.groups = groups
     container.social = SocialService(session_factory)
     container.rewards = RewardService(session_factory)
+    container.setup = GroupSetupService(session_factory)
     container.audit = audit
     container.rating = rating
     container.maintenance = None

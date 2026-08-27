@@ -30,6 +30,7 @@ from bot.middlewares import (
 from bot.services.app_config import AppConfigService
 from bot.services.audit import AuditService
 from bot.services.rewards import RewardService
+from bot.services.setup import GroupSetupService
 from bot.services.social import SocialService
 from bot.services.game_chat import (
     DbForumProvider,
@@ -56,7 +57,7 @@ class Services:
 
     def __init__(self, session_factory, notifier, timers, phases, games, rooms, app_config,
                  test_games, settings, permissions, groups, audit, rating, maintenance,
-                 social, rewards, game_chats=None):
+                 social, rewards, game_chats=None, setup=None):
         self.session_factory = session_factory
         self.notifier = notifier
         self.timers = timers
@@ -74,6 +75,7 @@ class Services:
         self.social = social
         self.rewards = rewards
         self.game_chats = game_chats
+        self.setup = setup
 
 
 def build_services(bot: Bot, settings) -> tuple[Services, TimerManager]:
@@ -112,10 +114,12 @@ def build_services(bot: Bot, settings) -> tuple[Services, TimerManager]:
     maintenance = MaintenanceMiddleware(session_factory)
     social = SocialService(session_factory)
     rewards = RewardService(session_factory)
+    # Первичная настройка серверов (/setup, onboarding при добавлении бота)
+    setup_service = GroupSetupService(session_factory)
     services = Services(
         session_factory, notifier, timers, phases, games, rooms, app_config, test_games,
         settings, permissions, groups_service, audit, rating, maintenance, social, rewards,
-        game_chats=game_chats,
+        game_chats=game_chats, setup=setup_service,
     )
     services.engine = engine  # для корректного dispose при остановке
     return services, timers
@@ -187,7 +191,10 @@ async def main() -> None:
     bot, dp, _services, _timers = await create_app()
     try:
         await bot.delete_webhook(drop_pending_updates=False)
-        await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
+        await dp.start_polling(
+            bot,
+            allowed_updates=["message", "callback_query", "my_chat_member"],
+        )
     finally:
         await bot.session.close()
 

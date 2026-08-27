@@ -13,6 +13,7 @@ from bot.handlers import (
     ratings,
     rewards,
     rooms,
+    setup,
     social,
     start,
     testgame,
@@ -28,6 +29,7 @@ def get_root_router() -> Router:
     root.include_router(rewards.router)
     root.include_router(groups_admin.router)
     root.include_router(ratings.router)
+    root.include_router(setup.router)
     root.include_router(start.router)
     root.include_router(profile.router)
     root.include_router(social.router)

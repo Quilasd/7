@@ -99,7 +99,18 @@ class TelegramGameChatGateway:
         try:
             return await coro_factory()
         except Exception as exc:  # TelegramAPIError и любые другие
-            logger.warning("GameChat: не удалось %s: %s", what, exc)
+            # права отозвали после настройки — типичный случай; бот НЕ падает,
+            # игра продолжается, администратору вернёт право через /setup
+            text = str(exc).lower()
+            if "not enough rights" in text or "chat_admin_required" in text:
+                logger.warning(
+                    "GameChat: не удалось %s — у бота нет прав "
+                    "(администратор/управление темами). Попросите админа вернуть "
+                    "право и повторить /setup. Детали: %s",
+                    what, exc,
+                )
+            else:
+                logger.warning("GameChat: не удалось %s: %s", what, exc)
             return None
 
     async def create_topic(

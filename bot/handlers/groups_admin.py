@@ -905,6 +905,43 @@ async def cmd_staff_info(message: Message, command: CommandObject, session, grou
 
 # --------------------------------------------------------------- /settings
 
+
+def _server_status_lines(group, s, check=None) -> list[str]:
+    """Статус сервера для /settings: настроенность + Forum Topics.
+
+    check — опциональный живой SetupCheck (с проверкой прав Telegram);
+    без него статус берётся из БД (setup_completed_at / форумы партий).
+    """
+    from bot.utils.helpers import esc as _esc
+
+    configured = bool(getattr(s, "setup_completed_at", None))
+    lines = [
+        f"⚙️ <b>НАСТРОЙКИ MAFIA ONLINE</b>\n<i>{_esc(group.title or '')}</i>", "",
+        "Статус сервера:",
+        ("🟢 Настроен" if configured else "🟡 Не настроен — выполните /setup"),
+    ]
+    if check is not None:
+        lines.append("🟢 Forum Topics" if check.is_forum else "🔴 Темы форума отключены")
+        lines.append(
+            "🟢 Управление темами" if check.can_manage_topics
+            else "🔴 Нет права «Управление темами»"
+        )
+        lines.append(
+            "🟢 Бот — администратор" if check.is_admin else "🔴 Бот не администратор"
+        )
+    game_forum = getattr(s, "game_forum_chat_id", None)
+    mafia_forum = getattr(s, "mafia_forum_chat_id", None)
+    if game_forum or mafia_forum:
+        lines.append(
+            f"🟢 Форумы партий: игра <code>{game_forum or '—'}</code>, "
+            f"мафия <code>{mafia_forum or '—'}</code>"
+        )
+    else:
+        lines.append("⚪ Форумы партий не заданы — партии идут в ЛС (/set_game_forum)")
+    lines.append("")
+    return lines
+
+
 @router.message(Command("settings"))
 async def cmd_settings(message: Message, session, group, services) -> None:
     if await _require(session, services, message, group, Permission.MANAGE_SETTINGS) is None:
@@ -913,16 +950,24 @@ async def cmd_settings(message: Message, session, group, services) -> None:
         await message.answer("⚙️ Настройки группы доступны только внутри группы.")
         return
     settings = await services.groups.get_settings(group.id)
-    await message.answer(_settings_text(group, settings), reply_markup=_settings_kb())
+    # живой статус прав сервера (Telegram API), поверх статичного блока БД
+    check = None
+    setup_service = getattr(services, "setup", None)
+    if setup_service is not None:
+        try:
+            check = await setup_service.check(message.bot, group.telegram_chat_id)
+        except Exception:
+            check = None
+    await message.answer(
+        _settings_text(group, settings, check=check), reply_markup=_settings_kb()
+    )
 
 
-def _settings_text(group, s) -> str:
+def _settings_text(group, s, check=None) -> str:
     def onoff(value: bool) -> str:
         return "✅" if value else "⛔"
 
-    return "\n".join([
-        f"⚙️ <b>НАСТРОЙКИ ГРУППЫ</b>\n<i>{esc(group.title or '')}</i>",
-        "",
+    return "\n".join(_server_status_lines(group, s, check=check) + [
         f"👥 Игроки: {s.min_players}–{s.max_players}",
         f"⏱ Таймеры: 🌙{s.night_seconds}с ☀️{s.day_seconds}с 🗳{s.vote_seconds}с (обсуждение {s.discussion_seconds}с)",
         f"🎭 Роли: мафия ×{s.mafia_count}, маньяк {onoff(s.allow_maniac)}",
