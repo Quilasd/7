@@ -547,10 +547,14 @@ async def cmd_level_info(message: Message) -> None:
     """Таблица уровней (сколько XP нужно на каждый уровень)."""
     from bot.services.progression import DEFAULT_PROGRESSION as prog
 
-    lines = ["📈 <b>ТАБЛИЦА УРОВНЕЙ</b>", ""]
-    for lvl in range(2, 26):
-        need = prog.threshold(lvl) - prog.threshold(lvl - 1)
-        lines.append(f"Ур. {lvl} — {prog.threshold(lvl)} XP (+{need} за уровень)")
+    lines = ["📈 <b>ТАБЛИЦА УРОВНЕЙ</b>", "",
+             "<i>Уровень · XP внутри уровня · суммарный XP</i>", ""]
+    for lvl in range(1, 16):
+        lines.append(
+            f"Ур. {lvl} — {prog.requirement(lvl)} XP "
+            f"(всего {prog.threshold(lvl + 1)})"
+        )
     lines.append("")
-    lines.append("25+ — дальше с шагом +50 XP за каждый уровень.")
+    lines.append("Дальше — требования продолжают расти (+20 XP за уровень к приросту).")
+    lines.append("В Owner-панели — полная таблица с пагинацией: /owner → ✨ XP и уровни.")
     await message.answer("\n".join(lines))

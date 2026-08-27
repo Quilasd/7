@@ -27,6 +27,9 @@ def profile_text(user, header: bool = True, progression=None, ranks=None, extras
     extras: {'title': str, 'event_reward': str, 'achievements': 'X/Y',
              'win_streak': int, 'best_win_streak': int} — доп. блоки.
     """
+    from bot.services.progression import DEFAULT_PROGRESSION
+
+    progression = progression or DEFAULT_PROGRESSION
     ranks = ranks or {}
     extras = extras or {}
     total = user.wins + user.losses
@@ -36,11 +39,15 @@ def profile_text(user, header: bool = True, progression=None, ranks=None, extras
         pos = ranks.get(key)
         return f" <code>(#{pos})</code>" if pos else ""
 
+    from bot.utils.helpers import xp_progress_lines
+
+    # уровень выводится ИЗ XP — всегда согласован с прогресс-баром
+    level = progression.level_for_xp(max(0, user.xp))
     lines = ["🌐 <b>ГЛОБАЛЬНО</b>", ""]
     lines.append(f"⭐ Общий: <b>{user.rating}</b>{_rank('rating')}")
     lines.append(f"🏆 Побед: <b>{user.wins}</b>{_rank('wins')}")
-    lines.append(f"📈 Уровень: <b>{user.level}</b>{_rank('level')}")
-    lines.append(f"✨ XP: <b>{user.xp}</b>")
+    lines.append(f"📈 Уровень: <b>{level}</b>{_rank('level')}")
+    lines += xp_progress_lines(user.xp, progression)
     lines.append("")
     lines.append(
         f"🎮 Игр: <b>{user.games_played}</b> · 💀 Поражений: <b>{user.losses}</b> · 📊 {winrate:.0f}%"

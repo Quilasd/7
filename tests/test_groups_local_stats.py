@@ -107,7 +107,7 @@ class TestLocalStatsIsolation:
         ga = await services.groups.local_player(a.id, user.id)
         gb = await services.groups.local_player(b.id, user.id)
         assert ga.games_played == 3 and ga.wins == 3 and ga.rating == 330
-        assert ga.xp == 120 and ga.level == 2  # 3 * 40 = 120 -> уровень 2
+        assert ga.xp == 120 and ga.level == 1  # 3*40=120; до 2-го уровня теперь 150
         assert gb.games_played == 1 and gb.losses == 1 and gb.rating == 25
         assert gb.xp == 10 and gb.level == 1
 

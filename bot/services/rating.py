@@ -79,6 +79,8 @@ class ScopeFlags:
 class AppliedStats:
     rating_delta: dict[int, int] = field(default_factory=dict)
     xp_delta: dict[int, int] = field(default_factory=dict)
+    # user_id -> (старый уровень, новый уровень); только реальные повышения
+    level_ups: dict[int, tuple[int, int]] = field(default_factory=dict)
 
 
 def contribution(rules: RatingRules, user_id: int, events: StatEvents, survived: bool) -> tuple[int, int]:
@@ -165,7 +167,12 @@ class RatingService:
                 row.rating = max(0, row.rating + rating_delta)
             if scope.xp:
                 row.xp = max(0, row.xp + xp_delta)
-                row.level = self.progression.level_for_xp(row.xp)
+                new_level = self.progression.level_for_xp(row.xp)
+                if new_level > int(getattr(row, "level", 1) or 1):
+                    applied.level_ups[user_id] = (
+                        int(getattr(row, "level", 1) or 1), new_level
+                    )
+                row.level = new_level
 
             # Счётчики личного вклада (идентичны в обоих скоупах)
             row.kills += events.kills.get(user_id, 0)

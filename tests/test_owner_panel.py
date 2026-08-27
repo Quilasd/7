@@ -156,17 +156,23 @@ class TestOwnerSections:
         assert "Общий рейтинг: <b>100</b>" in text
         assert "🏆 Победы: <b>5</b>" in text
         assert "🏅 Достижения: <b>0/12</b>" in text
+        assert "Опыт:" in text and "XP" in text  # прогресс уровня
 
         text, _kb = await ow._screen_ratings(session, "global", "rating")
         assert "ОБЩИЙ РЕЙТИНГ" in text
 
     async def test_level_table_matches_progression(self, services, session, monkeypatch):
+        """Таблица уровней: реальные значения сервиса + пагинация."""
         owner, _ = await _setup_owner(services, session, monkeypatch)
         from bot.services.progression import DEFAULT_PROGRESSION as prog
 
-        text = ow._screen_leveltable()
-        assert f"Уровень 2 → {prog.threshold(2)} XP" in text
-        assert f"Уровень 10 → {prog.threshold(10)} XP" in text
+        text, kb = ow._screen_leveltable(0)
+        assert f"Уровень <b>1</b> → {prog.requirement(1)} XP" in text
+        assert f"Уровень <b>10</b> → {prog.requirement(10)} XP" in text
+        assert "11–20" in str(kb)      # есть кнопка следующей страницы
+        text2, kb2 = ow._screen_leveltable(1)
+        assert f"Уровень <b>11</b>" in text2
+        assert "1–10" in str(kb2)      # и кнопка назад
 
 
 class TestOwnerFlows:
@@ -234,7 +240,7 @@ class TestOwnerFlows:
         )
         from bot.services.progression import DEFAULT_PROGRESSION as prog
 
-        assert target.xp == 1000 and target.level == prog.level_for_xp(1000) == 6
+        assert target.xp == 1000 and target.level == prog.level_for_xp(1000) == 3  # 1030 -> 4-й
 
     async def test_level_set_syncs_xp(self, services, session, monkeypatch):
         owner, target = await _setup_owner(services, session, monkeypatch)

@@ -75,7 +75,7 @@ class TestOwnerStatsCommands:
             session=session, services=services, db_user=owner,
         )
         assert target.xp == 1000
-        assert target.level == prog.level_for_xp(1000) == 6  # существующая система
+        assert target.level == prog.level_for_xp(1000) == 3  # новая кривая: 4-й с 1030
 
     async def test_owner_set_level_syncs_xp(self, services, session, monkeypatch):
         owner, target = await _owner_setup(services, session, monkeypatch)
@@ -204,7 +204,8 @@ class TestLevelInfo:
         msg = FakeMessage(FakeTgUser(user.telegram_id), "/level_info")
         await adm.cmd_level_info(msg)
         assert "ТАБЛИЦА УРОВНЕЙ" in msg.answers[0]
-        assert f"Ур. 2 — {prog.threshold(2)} XP" in msg.answers[0]
+        assert f"Ур. 1 — {prog.requirement(1)} XP" in msg.answers[0]
+        assert f"Ур. 3 — {prog.requirement(3)} XP" in msg.answers[0]
 
 
 class TestTitleAdminCommands:

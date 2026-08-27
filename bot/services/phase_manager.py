@@ -568,6 +568,25 @@ class PhaseManager:
                 won = gp.user_id in winner_ids
                 head = "🎉 Ты в числе победителей!" if won else "😔 Поражение."
                 personal = head + "\n" + "\n".join(parts)
+                # 🎉 повышение уровня (одно сообщение, даже если уровней несколько)
+                from bot.utils.helpers import xp_progress_lines
+
+                lu_global = (applied_global.level_ups.get(gp.user_id)
+                             if apply_global else None)
+                lu_local = (applied_local.level_ups.get(gp.user_id)
+                            if apply_local else None)
+                if lu_global or lu_local:
+                    old_level, new_level = lu_global or lu_local
+                    progress = xp_progress_lines(
+                        users_by_id[gp.user_id].xp if apply_global
+                        else gp.user.xp
+                    )
+                    personal += (
+                        f"\n\n🎉 <b>НОВЫЙ УРОВЕНЬ: {old_level} → {new_level}!</b>\n"
+                        f"📈 Уровень: <b>{new_level}</b>\n" + "\n".join(progress)
+                    )
+                    if lu_local and (not lu_global or lu_local[1] != lu_global[1]):
+                        personal += f"\n🏠 В группе: уровень {lu_local[1]}"
             awards = newly_awarded.get(gp.user_id)
             if awards:
                 from bot.services import titles as _t

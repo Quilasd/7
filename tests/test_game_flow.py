@@ -684,3 +684,48 @@ class TestMetaAfterFullGame:
             assert gp_mafia.losses == 1
             # место в группе пересчитано: победитель выше проигравшего
             assert await gp_repo.rank_in_group(group.id, "rating", gp.rating) == 1
+
+
+class TestLevelUpNotification:
+    """🎉 НОВЫЙ УРОВЕНЬ в финальном сообщении (одним сообщением, без спама)."""
+
+    async def test_level_up_announced_in_final_message(self, services, session, notifier):
+        users = [await make_user(session, f"L{i}") for i in range(1, 7)]
+        # все в 10 XP от 2-го уровня: любая партия поднимет уровень
+        for u in users:
+            u.xp, u.level = 140, 1
+        await session.commit()
+
+        game_id = await _start_game(
+            services, session, users, roles_setup={"mafia": 1, "detective": 1, "doctor": 1}
+        )
+        roles = await _roles_map(services, game_id)
+        mafia_uid = next(uid for uid, r in roles.items() if r == "mafia")
+        detective_uid = next(uid for uid, r in roles.items() if r == "detective")
+
+        await services.phases.begin_game(game_id)
+        await services.games.submit_night_action(game_id, mafia_uid, "kill", detective_uid)
+        await services.phases.end_night(game_id)
+        await services.phases.begin_voting(game_id)
+        for uid in roles:
+            if uid not in (mafia_uid, detective_uid):
+                assert (await services.games.cast_vote(game_id, uid, mafia_uid)).ok
+        await services.phases.end_voting(game_id)
+
+        # финальные сообщения содержат блок level-up с прогрессом нового уровня
+        level_ups = [text for _, text, _ in notifier.sent if "НОВЫЙ УРОВЕНЬ" in text]
+        assert level_ups, "нет ни одного уведомления о новом уровне"
+        for text in level_ups:
+            assert "📈 Уровень: <b>2</b>" in text
+            assert "Опыт:" in text and "XP" in text
+            assert "░" in text or "█" in text  # прогресс-бар
+        # ни одного промежуточного спама: одно сообщение с финальным уровнем
+        assert not any("НОВЫЙ УРОВЕНЬ: 1 → 1" in t for _, t, _ in notifier.sent)
+
+        async with services.session_factory() as s2:
+            from bot.services.progression import DEFAULT_PROGRESSION as prog
+
+            for u in users:
+                fresh = await UserRepository(s2).get_by_id(u.id)
+                assert fresh.level == prog.level_for_xp(fresh.xp)  # согласовано
+                assert fresh.level == 2  # 140 + минимум 10 = 150+

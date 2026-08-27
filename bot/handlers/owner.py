@@ -158,16 +158,16 @@ async def _screen_ratings(session, scope: str, metric: str, group=None) -> tuple
         lines += _top_lines(users, metric)
 
     kb = _rows(
-        [_btn("⭐ Общий", "ratings", f"{scope}.rating"),
+        [_btn("⭐ Общий рейтинг", "ratings", f"{scope}.rating"),
          _btn("🏆 Победы", "ratings", f"{scope}.wins"),
-         _btn("📈 Уровни", "ratings", f"{scope}.level")],
-        [_btn("🌐 Глобальный", "ratings", f"global.{metric}"),
-         _btn("🏠 Локальный", "ratings", f"local.{metric}")],
+         _btn("📈 Уровень", "ratings", f"{scope}.level")],
+        [_btn("🌐 Global", "ratings", f"global.{metric}"),
+         _btn("🏠 Local", "ratings", f"local.{metric}")],
         [_btn("➕ Добавить общий", "act", "rating_add"),
          _btn("✏️ Установить общий", "act", "rating_set")],
         [_btn("➕ Добавить победы", "act", "wins_add"),
          _btn("✏️ Установить победы", "act", "wins_set")],
-        [_btn("✨ Уровневый → XP", "xp"), _btn("👤 Игрок", "players")],
+        [_btn("✨ Уровневый → XP", "xp"), _btn("👤 Изменить игроку", "players")],
         [_btn("◀️ Назад", "main"), _btn("❌ Закрыть", "close")],
     )
     return "\n".join(lines), kb
@@ -183,14 +183,17 @@ async def _screen_player(session, services, user_id: int) -> tuple[str, InlineKe
         return "Игрок не найден.", _back_kb("players")
     streak = int(getattr(user, "win_streak", 0) or 0)
     ach = await UserAchievementRepository(session).count(user.id)
+    from bot.utils.helpers import xp_progress_lines
+
     lines = [
         f"👤 <b>{esc(user.display_name or user.username or user.telegram_id)}</b>",
         f"ID: <code>{user.telegram_id}</code>"
         + (f" · @{esc(user.username)}" if user.username else ""),
         "",
         f"⭐ Общий рейтинг: <b>{user.rating}</b>",
+        *xp_progress_lines(user.xp),
         f"🏆 Победы: <b>{user.wins}</b> · 💀 Поражений: <b>{user.losses}</b>",
-        f"📈 Уровень: <b>{user.level}</b> · ✨ XP: <b>{user.xp}</b>",
+        f"📈 Уровень: <b>{user.level}</b>",
         f"🔥 Серия: <b>{streak}</b> · 🏅 Достижения: <b>{ach}/{total_achievements()}</b>",
     ]
     kb = _rows(
@@ -233,11 +236,13 @@ async def _screen_player_xp(session, user_id: int) -> tuple[str, InlineKeyboardM
     if user is None:
         return "Игрок не найден.", _back_kb("players")
     name = esc(user.display_name or user.username or user.telegram_id)
-    _, in_level, need = prog.xp_progress_in_level(user.xp)
+    from bot.utils.helpers import xp_progress_lines
+
     lines = [
         f"✨ <b>XP И УРОВЕНЬ</b> · {name}", "",
-        f"📈 Уровень: <b>{user.level}</b> · ✨ XP: <b>{user.xp}</b>",
-        f"До следующего уровня: {in_level}/{need}",
+        f"📈 Уровень: <b>{user.level}</b>",
+        *xp_progress_lines(user.xp),
+        f"<i>Общий XP аккаунта: {user.xp}</i>",
     ]
     kb = _rows(
         [_btn("➕ XP", "act", f"xp_add.{user.id}"),
@@ -249,16 +254,37 @@ async def _screen_player_xp(session, user_id: int) -> tuple[str, InlineKeyboardM
     return "\n".join(lines), kb
 
 
-def _screen_leveltable() -> str:
+LEVEL_TABLE_PAGE_SIZE = 10
+LEVEL_TABLE_MAX = 50  # показываем первые 50 уровней; дальше формула та же
+
+
+def _screen_leveltable(page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
+    """Таблица уровней по 10 на экран, значения из ProgressionService."""
     from bot.services.progression import DEFAULT_PROGRESSION as prog
 
-    lines = ["📊 <b>ТАБЛИЦА УРОВНЕЙ</b>", ""]
-    for lvl in range(2, 26):
-        need = prog.threshold(lvl) - prog.threshold(lvl - 1)
-        lines.append(f"Уровень {lvl} → {prog.threshold(lvl)} XP (+{need})")
+    pages = (LEVEL_TABLE_MAX + LEVEL_TABLE_PAGE_SIZE - 1) // LEVEL_TABLE_PAGE_SIZE
+    page = max(0, min(page, pages - 1))
+    lo = page * LEVEL_TABLE_PAGE_SIZE + 1
+    hi = min(lo + LEVEL_TABLE_PAGE_SIZE - 1, LEVEL_TABLE_MAX)
+
+    lines = ["📊 <b>ТАБЛИЦА УРОВНЕЙ</b>", "",
+             "<i>Уровень · XP внутри уровня · суммарный XP</i>", ""]
+    for lvl in range(lo, hi + 1):
+        lines.append(
+            f"Уровень <b>{lvl}</b> → {prog.requirement(lvl)} XP "
+            f"(всего {prog.threshold(lvl + 1) if lvl < LEVEL_TABLE_MAX else '…'})"
+        )
     lines.append("")
-    lines.append("Дальше — +50 XP к порогу за каждый уровень.")
-    return "\n".join(lines)
+    lines.append("Дальше требования продолжают расти (+20 XP за уровень к приросту).")
+
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(_btn(f"◀️ {page * 10 - 9}–{page * 10}", "leveltable", str(page - 1)))
+    nav.append(_btn(f"{lo}–{hi} / {LEVEL_TABLE_MAX}", "noop"))
+    if page < pages - 1:
+        nav.append(_btn(f"{hi + 1}–{min(hi + 10, LEVEL_TABLE_MAX)} ▶️", "leveltable", str(page + 1)))
+    rows = [nav, [_btn("◀️ Назад", "xp"), _btn("❌ Закрыть", "close")]]
+    return "\n".join(lines), _rows(*rows)
 
 
 async def _screen_achievements(session) -> tuple[str, InlineKeyboardMarkup]:
@@ -771,8 +797,9 @@ async def cb_player(callback: CallbackQuery, callback_data: OwnerCB, services, s
 async def cb_ratings(callback: CallbackQuery, callback_data: OwnerCB, services, session, group) -> None:
     if not await _guard_cb(callback, services):
         return
-    scope, _, metric = callback_data.value.partition(".") if callback_data.value \
-        else ("global", "rating")
+    scope, _, metric = (
+        callback_data.value.partition(".") if callback_data.value else ("global", "", "rating")
+    )
     text, kb = await _screen_ratings(session, scope, metric or "rating", group)
     await _render(callback, text, kb)
 
@@ -786,10 +813,18 @@ async def cb_xp(callback: CallbackQuery, services) -> None:
 
 
 @router.callback_query(OwnerCB.filter(F.action == "leveltable"))
-async def cb_leveltable(callback: CallbackQuery, services) -> None:
+async def cb_leveltable(callback: CallbackQuery, callback_data: OwnerCB, services) -> None:
     if not await _guard_cb(callback, services):
         return
-    await _render(callback, _screen_leveltable(), _back_kb("xp"))
+    page = int(callback_data.value) if callback_data.value.isdigit() else 0
+    text, kb = _screen_leveltable(page)
+    await _render(callback, text, kb)
+
+
+@router.callback_query(OwnerCB.filter(F.action == "noop"))
+async def cb_noop(callback: CallbackQuery) -> None:
+    """Кнопка-индикатор страницы (ничего не меняет)."""
+    await callback.answer()
 
 
 @router.callback_query(OwnerCB.filter(F.action == "achievements"))
