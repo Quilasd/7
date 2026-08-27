@@ -388,3 +388,17 @@ class TestAdminIndependence:
 
 async def _fake_edit(cb, text, kb=None):
     cb.answers.append(text)
+
+
+class TestOwnerForumsSection:
+    """Секция 🎮 Форумы: статус форумов и кнопки."""
+
+    async def test_forums_screen_renders(self, services, session, monkeypatch):
+        owner, _ = await _setup_owner(services, session, monkeypatch)
+        from bot.services.game_chat import StaticForumProvider
+        services.game_chats.forums = StaticForumProvider(None, None)
+        text = await ow._screen_forums(services)
+        assert "ИГРОВЫЕ ФОРУМЫ" in text
+        assert "Game Forum" in text and "Mafia Forum" in text
+        assert "не настроен" in text
+        assert "/set_game_forum" in text and "/set_mafia_forum" in text

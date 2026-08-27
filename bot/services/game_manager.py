@@ -124,27 +124,15 @@ class GameManager:
             logger.info(
                 "Игра %s создана из комнаты %s: %s игроков", game.id, room.id, len(players)
             )
-            # Игровые чаты (Game Chat / Mafia Chat): бот не может создавать чаты
-            # в Telegram Bot API — создатель партии делает это сам и привязывает
-            # командами /gamechat и /mafiachat (инструкция в ЛС).
+            # Форумные темы партии: создаются автоматически в двух постоянных
+            # форумах (GAME_FORUM_CHAT_ID / MAFIA_FORUM_CHAT_ID). Ручных
+            # команд больше не нужно; если форумы не настроены — игра в ЛС.
             if self.game_chats is not None:
                 try:
-                    await self.notifier.send(
-                        creator_user_id,
-                        "🎮 <b>Игра #{g} запущена!</b>\n\n"
-                        "Хотите отдельные чаты партии? Telegram не позволяет боту "
-                        "создавать группы, поэтому:\n"
-                        "1️⃣ создайте группу <b>🎮 Мафия — Игра #{g}</b> для обсуждений;\n"
-                        "2️⃣ создайте группу <b>🌙 Мафия — Игра #{g}</b> для мафии;\n"
-                        "3️⃣ добавьте бота администратором в обе;\n"
-                        "4️⃣ в первой напишите <code>/gamechat {g}</code>, "
-                        "во второй — <code>/mafiachat {g}</code>.\n\n"
-                        "Бот сам пришлёт игрокам ссылки, будет управлять правами "
-                        "по фазам и анонсами. Без чатов игра идёт как раньше — "
-                        "полностью в личке.".format(g=game.id),
-                    )
+                    await self.game_chats.on_game_started(session, game, players)
+                    await session.commit()
                 except Exception:
-                    logger.warning("Не удалось отправить инструкцию по чатам")
+                    logger.warning("GameChat: не удалось создать темы партии")
             return ActionResult(
                 True,
                 f"🎮 Игра #{game.id} запущена! Роли распределены, первая ночь через {countdown} сек.",

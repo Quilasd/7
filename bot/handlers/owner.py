@@ -71,7 +71,8 @@ def _main_kb() -> InlineKeyboardMarkup:
         [_btn("🏆 Рейтинги", "ratings"), _btn("✨ XP и уровни", "xp")],
         [_btn("🏅 Достижения", "achievements"), _btn("🎖 Титулы", "titles")],
         [_btn("🎪 Ивенты", "rewards"), _btn("🎮 Тестовая игра", "testgame")],
-        [_btn("🧪 Debug", "debug"), _btn("⚙️ Система", "system")],
+        [_btn("🎮 Форумы", "forums"), _btn("🧪 Debug", "debug")],
+        [_btn("⚙️ Система", "system")],
         [_btn("🔨 Администрация", "staff")],
         [_btn("❌ Закрыть", "close")],
     )
@@ -871,6 +872,57 @@ async def cb_debug(callback: CallbackQuery, services) -> None:
         return
     text, kb = _screen_debug()
     await _render(callback, text, kb)
+
+
+async def _screen_forums(services) -> str:
+    """🎮 Игровые форумы: статус подключения и подсказки настройки."""
+    try:
+        forums = await services.game_chats.check_forums()
+    except Exception:
+        forums = {"game": {"chat_id": None, "ok": False, "error": "сервис недоступен",
+                           "configured": False, "title": ""},
+                  "mafia": {"chat_id": None, "ok": False, "error": "сервис недоступен",
+                            "configured": False, "title": ""}}
+
+    def _line(label: str, info: dict) -> list[str]:
+        cid = info.get("chat_id")
+        if not info.get("configured"):
+            status = "⚪ не настроен"
+        elif info.get("ok"):
+            title = info.get("title") or ""
+            status = f"🟢 подключен{f' — {title}' if title else ''}"
+        else:
+            status = f"🔴 {info.get('error', 'недоступен')}"
+        return [f"{label}: {status}", f"    Chat ID: <code>{cid if cid else '—'}</code>"]
+
+    lines = ["🎮 <b>ИГРОВЫЕ ФОРУМЫ</b>", ""]
+    lines += _line("🎮 Game Forum", forums["game"])
+    lines.append("")
+    lines += _line("🌙 Mafia Forum", forums["mafia"])
+    lines += [
+        "",
+        "Темы партий создаются автоматически при старте игры.",
+        "Настройка (OWNER):",
+        "• <code>/set_game_forum</code> — в самом чате форума или с chat_id;",
+        "• <code>/set_mafia_forum</code> — аналогично для форума мафии.",
+        "",
+        "Бот должен быть администратором обоих форумов",
+        "с правом <b>can_manage_topics</b>.",
+        "",
+        "Без форумов игры идут полностью в ЛС с ботом.",
+    ]
+    return "\n".join(lines)
+
+
+@router.callback_query(OwnerCB.filter(F.action == "forums"))
+async def cb_forums(callback: CallbackQuery, services) -> None:
+    if not await _guard_cb(callback, services):
+        return
+    kb = _rows(
+        [_btn("🔄 Проверить", "forums")],
+        [_btn("◀️ В меню", "main"), _btn("❌ Закрыть", "close")],
+    )
+    await _render(callback, await _screen_forums(services), kb)
 
 
 @router.callback_query(OwnerCB.filter(F.action == "system"))

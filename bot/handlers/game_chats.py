@@ -1,18 +1,14 @@
-"""Привязка игровых чатов партии (Game Chat / Mafia Chat).
+"""Настройка игровых форумов (Game Forum / Mafia Forum).
 
-Telegram Bot API не позволяет боту создавать группы и добавлять участников,
-поэтому чаты создаёт создатель партии, добавляет бота администратором и
-привязывает командами в самих чатах:
+Темы партии создаются БОТОМ автоматически при старте игры в двух постоянных
+форумных чатах (GAME_FORUM_CHAT_ID / MAFIA_FORUM_CHAT_ID) — ручных команд
+на каждую игру больше не нужно (/gamechat и /mafiachat удалены).
 
-- /gamechat <game_id>  — в общем чате партии (🎮 обсуждения днём);
-- /mafiachat <game_id> — в чате мафии (🌙 только живая мафия ночью).
+Здесь только OWNER-настройка постоянных форумов:
+- /set_game_forum  [chat_id] — выполнить в самом форуме или с аргументом;
+- /set_mafia_forum [chat_id] — аналогично для форума мафии.
 
-После привязки бот: ставит title, шлёт игрокам инвайт-ссылки в ЛС (вступают
-сами — боты не могут добавлять участников), синхронизирует права по текущей
-фазе, ведёт анонсы и модерацию (мёртвые/неучастники/ночь — молчание).
-
-Права на привязку: создатель партии или глобальный владелец/админ
-(серверная проверка в GameChatService и здесь).
+Модерация тем партий — GameChatGuardMiddleware (bot/middlewares).
 """
 
 from __future__ import annotations
@@ -23,57 +19,64 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from bot.database.repositories.games import GameRepository
-
 logger = logging.getLogger(__name__)
 
-router = Router(name="game_chats")
+router = Router(name="game_forums")
 
 
-async def _link(message: Message, session, services, db_user, kind: str) -> None:
-    parts = (message.text or "").split()
-    cmd = "gamechat" if kind == "game" else "mafiachat"
-    if len(parts) != 2 or not parts[1].isdigit():
-        await message.answer(
-            f"Формат: <code>/{cmd} &lt;ID игры&gt;</code>\n"
-            f"Например: <code>/{cmd} 123</code>"
-        )
-        return
-    if message.chat.type not in ("group", "supergroup"):
-        await message.answer("Эту команду нужно выполнить в привязываемом групповом чате.")
-        return
-
-    game_id = int(parts[1])
-    game = await GameRepository(session).get(game_id)
-    if game is None:
-        await message.answer(f"Игра #{game_id} не найдена.")
-        return
-
+async def _set_forum(message: Message, session, services, db_user, kind: str) -> None:
     settings = services.settings
-    is_privileged = db_user is not None and settings is not None and (
+    is_owner = db_user is not None and settings is not None and (
         db_user.telegram_id in (getattr(settings, "_owners", None) or [])
-        or db_user.telegram_id in (getattr(settings, "_admins", None) or [])
     )
-    ok, text = await services.game_chats.link_chat(
-        session, game, message.chat.id, kind, db_user.id,
-        is_privileged=is_privileged,
-    )
-    await session.commit()
-    await message.answer(text)
-    if ok:
-        logger.info(
-            "Chat %s привязан к игре %s (%s) пользователем %s",
-            message.chat.id, game_id, kind, db_user.id,
+    if not is_owner:
+        await message.answer("⚙️ Настройку форумов может выполнять только владелец бота.")
+        return
+
+    # chat_id: аргумент команды либо чат, в котором она выполнена
+    parts = (message.text or "").split()
+    chat_id = None
+    if len(parts) > 1 and parts[1].lstrip("-").isdigit():
+        chat_id = int(parts[1])
+    elif message.chat.type in ("group", "supergroup"):
+        chat_id = message.chat.id
+    if chat_id is None:
+        await message.answer(
+            f"Формат: <code>/{'set_game_forum' if kind == 'game' else 'set_mafia_forum'} "
+            "&lt;chat_id&gt;</code> — или выполните команду в самом форумном чате."
         )
+        return
+
+    app_config = getattr(services, "app_config", None)
+    if app_config is None:
+        await message.answer("Конфигурация недоступна.")
+        return
+    gs = await app_config.get()
+    if kind == "game":
+        gs.game_forum_chat_id = chat_id
+    else:
+        gs.mafia_forum_chat_id = chat_id
+    await app_config.save(gs)
+
+    # сразу проверяем доступ
+    forums = await services.game_chats.check_forums()
+    info = forums[kind]
+    status = "✅ форум доступен" if info["ok"] else f"⚠️ {info.get('error', 'проблема')}"
+    label = "Game Forum" if kind == "game" else "Mafia Forum"
+    await message.answer(
+        f"⚙️ {label} настроен: <code>{chat_id}</code>\n{status}\n\n"
+        + ("" if info["ok"] else
+           "Убедитесь: это супергруппа-форум (включены темы) и бот — администратор "
+           "с правом <b>can_manage_topics</b>.")
+    )
+    logger.info("Настроен %s: %s (user %s)", label, chat_id, db_user.id)
 
 
-@router.message(Command("gamechat"))
-async def cmd_gamechat(message: Message, session, services, db_user) -> None:
-    """Привязать этот чат как общий игровой чат партии."""
-    await _link(message, session, services, db_user, "game")
+@router.message(Command("set_game_forum"))
+async def cmd_set_game_forum(message: Message, session, services, db_user) -> None:
+    await _set_forum(message, session, services, db_user, "game")
 
 
-@router.message(Command("mafiachat"))
-async def cmd_mafiachat(message: Message, session, services, db_user) -> None:
-    """Привязать этот чат как ночной чат мафии партии."""
-    await _link(message, session, services, db_user, "mafia")
+@router.message(Command("set_mafia_forum"))
+async def cmd_set_mafia_forum(message: Message, session, services, db_user) -> None:
+    await _set_forum(message, session, services, db_user, "mafia")

@@ -170,11 +170,13 @@ class Game(Base):
     # Журнал событий для статистики и разбора: [{type, ...}, ...]
     events: Mapped[list] = mapped_column(JSON, default=list)
 
-    # Игровые чаты партии (создаются игроками, ботом управляются):
-    # game_chat_id — общий чат партии (день/анонсы), mafia_chat_id — ночной
-    # чат живой мафии. NULL у старых игр и если чаты не привязаны.
+    # Форумные темы партии: game_chat_id/mafia_chat_id — ID ПОСТОЯННЫХ форумов,
+    # game_thread_id/mafia_thread_id — message_thread_id тем партии в них.
+    # (Старые игры: chat_id — отдельные чаты, thread_id NULL.)
     game_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     mafia_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    game_thread_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    mafia_thread_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

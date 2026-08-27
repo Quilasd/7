@@ -31,7 +31,11 @@ from bot.services.app_config import AppConfigService
 from bot.services.audit import AuditService
 from bot.services.rewards import RewardService
 from bot.services.social import SocialService
-from bot.services.game_chat import GameChatService, TelegramGameChatGateway
+from bot.services.game_chat import (
+    DbForumProvider,
+    GameChatService,
+    TelegramGameChatGateway,
+)
 from bot.services.game_manager import GameManager
 from bot.services.groups import GroupService
 from bot.services.permissions import PermissionService
@@ -80,13 +84,19 @@ def build_services(bot: Bot, settings) -> tuple[Services, TimerManager]:
     timers = TimerManager()
     locks = GameLocks()
     rating = RatingService()
-    game_chats = GameChatService(session_factory, TelegramGameChatGateway(bot), notifier)
+    app_config = AppConfigService(session_factory, settings)
+    # Темы партий: два ПОСТОЯННЫХ форума (env/owner-настройка), темы создаёт бот
+    game_chats = GameChatService(
+        session_factory,
+        TelegramGameChatGateway(bot),
+        notifier,
+        forums=DbForumProvider(app_config, settings),
+    )
     phases = PhaseManager(
         session_factory, notifier, timers, locks, rating=rating, app_settings=settings,
         game_chats=game_chats,
     )
     games = GameManager(session_factory, notifier, phases, locks, game_chats=game_chats)
-    app_config = AppConfigService(session_factory, settings)
     rooms = RoomService(
         session_factory,
         notifier,
