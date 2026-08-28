@@ -16,6 +16,7 @@ from bot.keyboards.room import (
     create_wizard_maxp_kb,
     create_wizard_minp_kb,
     create_wizard_privacy_kb,
+    play_empty_kb,
     players_manage_kb,
     roles_setup_kb,
     room_view_kb,
@@ -36,7 +37,22 @@ router = Router()
 # ------------------------------------------------------------------ создание
 
 @router.callback_query(MenuCB.filter(F.action == "create_room"))
-async def cb_create_start(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_create_start(callback: CallbackQuery, state: FSMContext, group=None) -> None:
+    if group is not None:
+        # В группе визард НЕ запускаем: он создаёт ГЛОБАЛЬНУЮ комнату (без
+        # группы), которая невидима для экрана «Играть» этой группы
+        # (изоляция ТЗ-11) — игрок «терял» свою комнату из списка.
+        # Комнаты группы создаются с правилами группы (/createroom).
+        await callback.answer()
+        await edit_or_answer(
+            callback,
+            "🏠 <b>КОМНАТА ГРУППЫ</b>\n\n"
+            "В группе комната создаётся с правилами этой группы "
+            "(роли и лимиты — из /settings).\n\n"
+            "Создать: <code>/createroom</code> или кнопкой ниже 👇",
+            play_empty_kb(in_group=True),
+        )
+        return
     await callback.answer()
     await state.clear()
     await state.set_state(RoomCreationStates.name)

@@ -11,7 +11,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from bot.database.repositories.games import GamePlayerRepository
 from bot.database.repositories.rooms import RoomRepository
 from bot.keyboards.common import back_to_menu_kb, main_menu_kb
-from bot.keyboards.room import rooms_list_kb
+from bot.keyboards.room import play_empty_kb, rooms_list_kb
 from bot.utils.callbacks import GameCB, MenuCB
 from bot.utils.helpers import display_name, esc
 from bot.utils.telegram import edit_or_answer
@@ -129,15 +129,23 @@ async def cb_play(callback: CallbackQuery, session, db_user, group=None) -> None
         open_rooms = await rooms.open_public_rooms(10)
     my_room = await rooms.open_room_of_user(db_user.id)
     if not open_rooms and my_room is None:
-        await edit_or_answer(
-            callback,
-            (
-                f"🔎 Открытых комнат в группе «{esc(group.title or '')}» нет."
-                if group is not None else
-                "🔎 Открытых публичных комнат нет.\n\nСоздай свою — «🏠 Создать комнату»!"
-            ),
-            back_to_menu_kb(),
-        )
+        # пустой экран — не тупик: подсказка о создании и вход по ID
+        if group is not None:
+            await edit_or_answer(
+                callback,
+                f"🔎 Открытых комнат в группе «{esc(group.title or '')}» нет.\n\n"
+                "🏠 Создать комнату с правилами группы: <code>/createroom</code>\n"
+                "➕ Или войди в существующую по её ID.",
+                play_empty_kb(in_group=True),
+            )
+        else:
+            await edit_or_answer(
+                callback,
+                "🔎 Открытых публичных комнат нет.\n\n"
+                "Создай свою — «🏠 Создать комнату»!\n"
+                "➕ Или войди в существующую по её ID.",
+                play_empty_kb(in_group=False),
+            )
         return
 
     if group is not None:
@@ -150,6 +158,9 @@ async def cb_play(callback: CallbackQuery, session, db_user, group=None) -> None
         lines.append(
             f"• #{room.id} «{esc(room.name)}» {lock} — 👥 {room.player_count()}/{room.max_players}"
         )
+    if not open_rooms:
+        # своя комната есть, но в этом скоупе других комнат нет
+        lines.append("Открытых комнат нет." if group is None else "Открытых комнат в группе нет.")
     lines.append("")
     lines.append("Нажми на комнату ниже, чтобы открыть её 👇")
     await edit_or_answer(callback, "\n".join(lines), rooms_list_kb(open_rooms, my_room))
