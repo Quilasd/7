@@ -93,13 +93,23 @@ class ForumGateway:
 
 
 class MuteBot:
-    """Бот для /mute: логирует restrict_chat_member, падает на выбранных чатах."""
+    """Бот для /mute: логирует restrict_chat_member, падает на выбранных чатах.
+
+    Каждый вызов валидируется по сигнатуре НАСТОЯЩЕГО aiogram Bot — фейк
+    не маскирует несовместимость с реальным API (регрессия раунда 12:
+    loose-kwargs can_send_messages=... валились в проде с TypeError).
+    """
 
     def __init__(self, fail_chats: set[int] | None = None) -> None:
         self.calls: list[dict] = []
         self.fail_chats = fail_chats or set()
 
     async def restrict_chat_member(self, **kwargs) -> bool:
+        import inspect
+
+        from aiogram import Bot as RealBot
+
+        inspect.signature(RealBot.restrict_chat_member).bind(None, **kwargs)
         self.calls.append(kwargs)
         if kwargs["chat_id"] in self.fail_chats:
             raise TelegramAPIError(
@@ -288,9 +298,11 @@ class TestGameRestrictionLifecycle:
 
         bot = MuteBot()
         # «административный мут до игры»: главный чат + зеркала в форумы
+        from bot.handlers.groups_admin import _mute_permissions
+
         await bot.restrict_chat_member(
             chat_id=MAIN_CHAT, user_id=users[1].telegram_id,
-            until_date=1, can_send_messages=False,
+            until_date=1, permissions=_mute_permissions(),
         )
         assert len(bot.calls) == 1
 
@@ -300,7 +312,7 @@ class TestGameRestrictionLifecycle:
 
         # финализация не добавила НИ одного restrict-вызова (в т.ч. unmute)
         assert len(bot.calls) == 1
-        assert bot.calls[0]["can_send_messages"] is False
+        assert bot.calls[0]["permissions"].can_send_messages is False
         # у игрового слоя вообще нет Telegram-restrict API (ТЗ-23)
         assert not hasattr(env.gateway, "restrict_chat_member")
 
@@ -440,7 +452,10 @@ class TestMuteForumScope:
         msg, bot = await self._mute(services, session, group, mod, target)
         restricted = {c["chat_id"] for c in bot.calls}
         assert restricted == {OTHER_MAIN, OTHER_GAME_FORUM, OTHER_MAFIA_FORUM}
-        assert all(c["can_send_messages"] is False for c in bot.calls)
+        assert all(c["permissions"].can_send_messages is False for c in bot.calls)
+        # мут полный: и текст, и медиа, и опросы (все запреты)
+        assert all(not c["permissions"].can_send_polls for c in bot.calls)
+        assert all(not c["permissions"].can_send_photos for c in bot.calls)
         assert all(c["user_id"] == target.telegram_id for c in bot.calls)
         assert any("мут на" in t for t in msg.answers)
 
@@ -467,7 +482,10 @@ class TestMuteForumScope:
         msg, bot = await self._mute(
             services, session, group, mod, target, text="/unmute"
         )
-        unmutes = [c for c in bot.calls if c.get("can_send_messages") is True]
+        unmutes = [
+            c for c in bot.calls
+            if c["permissions"].can_send_messages is True
+        ]
         assert {c["chat_id"] for c in unmutes} == {
             OTHER_MAIN, OTHER_GAME_FORUM, OTHER_MAFIA_FORUM
         }
@@ -505,7 +523,10 @@ class TestMuteForumScope:
         # команда завершилась штатно, ответ есть
         assert any("мут снят" in t for t in msg.answers)
         # основной чат и форум мафии размутированы, упавший форум — тоже вызван
-        unmuted = [c["chat_id"] for c in bot.calls if c.get("can_send_messages") is True]
+        unmuted = [
+            c["chat_id"] for c in bot.calls
+            if c["permissions"].can_send_messages is True
+        ]
         assert set(unmuted) == {OTHER_MAIN, OTHER_GAME_FORUM, OTHER_MAFIA_FORUM}
         # ошибка залогирована, не всплыла
         assert any(

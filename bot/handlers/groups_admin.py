@@ -23,7 +23,13 @@ import logging
 from aiogram import Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandObject
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    CallbackQuery,
+    ChatPermissions,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from bot.database.models import Group, PlayerStatus
 from bot.database.repositories.games import GamePlayerRepository, GameRepository
@@ -377,6 +383,50 @@ async def _group_forum_chats(session, group) -> list[int]:
     return sorted(chats)
 
 
+def _mute_permissions() -> ChatPermissions:
+    """Мут = полный запрет отправки (текст, медиа, опросы, превью).
+
+    Семантика restrictChatMember: пропущенные права = False, поэтому мут
+    блокирует ВСЕ виды сообщений, а не только текст.
+    """
+    return ChatPermissions(
+        can_send_messages=False,
+        can_send_polls=False,
+        can_send_other_messages=False,
+        can_add_web_page_previews=False,
+        can_send_audios=False,
+        can_send_documents=False,
+        can_send_photos=False,
+        can_send_videos=False,
+        can_send_video_notes=False,
+        can_send_voice_notes=False,
+    )
+
+
+def _unmute_permissions() -> ChatPermissions:
+    """Снятие мута = полное восстановление прав ОБЫЧНОГО участника.
+
+    Официальная семантика restrictChatMember: «Pass True for all
+    permissions to lift restrictions from a user» — пропущенные поля
+    остаются False, поэтому частичный грант оставлял бы игрока без
+    медиа/опросов. Админские права (can_change_info / can_pin_messages /
+    can_manage_topics) не выдаются — это не уровень участника.
+    """
+    return ChatPermissions(
+        can_send_messages=True,
+        can_send_polls=True,
+        can_send_other_messages=True,
+        can_add_web_page_previews=True,
+        can_send_audios=True,
+        can_send_documents=True,
+        can_send_photos=True,
+        can_send_videos=True,
+        can_send_video_notes=True,
+        can_send_voice_notes=True,
+        can_invite_users=True,
+    )
+
+
 @router.message(Command("mute", "unmute"))
 async def cmd_mute(message: Message, session, group, db_user, services) -> None:
     command = message.text.split()[0][1:].split("@")[0]
@@ -407,7 +457,7 @@ async def cmd_mute(message: Message, session, group, db_user, services) -> None:
                 chat_id=group.telegram_chat_id,
                 user_id=target.telegram_id,
                 until_date=until,
-                can_send_messages=False,
+                permissions=_mute_permissions(),
             )
             applied = True
         except TelegramAPIError as exc:
@@ -420,7 +470,7 @@ async def cmd_mute(message: Message, session, group, db_user, services) -> None:
                     chat_id=forum_chat_id,
                     user_id=target.telegram_id,
                     until_date=until,
-                    can_send_messages=False,
+                    permissions=_mute_permissions(),
                 )
             except TelegramAPIError as exc:
                 logger.warning(
@@ -432,10 +482,7 @@ async def cmd_mute(message: Message, session, group, db_user, services) -> None:
             await message.bot.restrict_chat_member(
                 chat_id=group.telegram_chat_id,
                 user_id=target.telegram_id,
-                can_send_messages=True,
-                can_send_other_messages=True,
-                can_add_web_page_previews=True,
-                can_invite_users=True,
+                permissions=_unmute_permissions(),
             )
             applied = True
         except TelegramAPIError as exc:
@@ -446,10 +493,7 @@ async def cmd_mute(message: Message, session, group, db_user, services) -> None:
                 await message.bot.restrict_chat_member(
                     chat_id=forum_chat_id,
                     user_id=target.telegram_id,
-                    can_send_messages=True,
-                    can_send_other_messages=True,
-                    can_add_web_page_previews=True,
-                    can_invite_users=True,
+                    permissions=_unmute_permissions(),
                 )
             except TelegramAPIError as exc:
                 logger.warning(

@@ -32,7 +32,12 @@ class FakeChat:
 
 
 class FakeBot:
-    """ Telegram-бот: restrict_chat_member либо успех, либо TelegramAPIError."""
+    """ Telegram-бот: restrict_chat_member либо успех, либо TelegramAPIError.
+
+    Вызовы restrict_chat_member ВАЛИДИРУЮТСЯ по сигнатуре настоящего
+    aiogram Bot (inspect.bind): фейк не должен маскировать несовместимость
+    с реальным API (регрессия: loose-kwargs падали с TypeError в проде).
+    """
 
     def __init__(self, fail: bool = False, member_status: str = "member") -> None:
         self.fail = fail
@@ -40,6 +45,11 @@ class FakeBot:
         self.calls: list[dict] = []
 
     async def restrict_chat_member(self, **kwargs) -> bool:
+        import inspect
+
+        from aiogram import Bot as RealBot
+
+        inspect.signature(RealBot.restrict_chat_member).bind(None, **kwargs)  # TypeError = баг
         from aiogram.exceptions import TelegramAPIError
 
         self.calls.append(kwargs)

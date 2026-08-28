@@ -53,7 +53,7 @@ class SettingsStub:
         return list(self._owners)
 
 
-@pytest.fixture()
+@pytest.fixture(scope="session")
 def event_loop_policy():
     return asyncio.get_event_loop_policy()
 
