@@ -119,10 +119,10 @@ def timer_adjust_kb(room_id: int) -> InlineKeyboardMarkup:
         rows.append([
             InlineKeyboardButton(text=title, callback_data=RoomCB(action="noop", room_id=room_id, value=phase_key).pack()),
             InlineKeyboardButton(
-                text="−30с", callback_data=RoomCB(action="timer", room_id=room_id, value=f"{phase_key}:-30").pack()
+                text="−30с", callback_data=RoomCB(action="timer", room_id=room_id, value=f"{phase_key}.-30").pack()
             ),
             InlineKeyboardButton(
-                text="+30с", callback_data=RoomCB(action="timer", room_id=room_id, value=f"{phase_key}:+30").pack()
+                text="+30с", callback_data=RoomCB(action="timer", room_id=room_id, value=f"{phase_key}.+30").pack()
             ),
         ])
     rows.append([

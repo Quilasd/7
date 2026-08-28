@@ -193,7 +193,7 @@ async def _render_roles_editor(
 # --------------------------------------------------- роли: инкремент/декремент
 
 async def _mutate_room_roles(
-    callback: CallbackQuery, callback_data: RoomCB, services, delta: int
+    callback: CallbackQuery, callback_data: RoomCB, services, db_user, delta: int
 ) -> None:
     room_id = callback_data.room_id
     if room_id == 0:
@@ -207,28 +207,35 @@ async def _mutate_room_roles(
         )
         return settings
 
-    room, message = await services.rooms.update_settings(room_id, callback.from_user.id, mutate)
+    # room.creator_id — внутренний DB users.id, а from_user.id — Telegram ID.
+    # Передаём db_user.id (как close/kick/leave/start): иначе реальный
+    # создатель получал отказ «Настройки меняет только создатель».
+    room, message = await services.rooms.update_settings(room_id, db_user.id, mutate)
     if room is None:
         await callback.answer(message, show_alert=True)
         return
     await callback.answer("Изменено" if "сохранены" in message else message[:100])
-    await _render_room_by_id(callback, services, room.id, callback.from_user.id)
+    await _render_room_by_id(callback, services, room.id, db_user.id)
 
 
 @router.callback_query(RoomCB.filter(F.action == "roleinc"))
-async def cb_role_inc(callback: CallbackQuery, callback_data: RoomCB, services, state: FSMContext) -> None:
+async def cb_role_inc(
+    callback: CallbackQuery, callback_data: RoomCB, services, state: FSMContext, db_user
+) -> None:
     if callback_data.room_id == 0:
         await _wizard_role_change(callback, callback_data, state, services, +1)
         return
-    await _mutate_room_roles(callback, callback_data, services, +1)
+    await _mutate_room_roles(callback, callback_data, services, db_user, +1)
 
 
 @router.callback_query(RoomCB.filter(F.action == "roledec"))
-async def cb_role_dec(callback: CallbackQuery, callback_data: RoomCB, services, state: FSMContext) -> None:
+async def cb_role_dec(
+    callback: CallbackQuery, callback_data: RoomCB, services, state: FSMContext, db_user
+) -> None:
     if callback_data.room_id == 0:
         await _wizard_role_change(callback, callback_data, state, services, -1)
         return
-    await _mutate_room_roles(callback, callback_data, services, -1)
+    await _mutate_room_roles(callback, callback_data, services, db_user, -1)
 
 
 async def _wizard_role_change(
@@ -571,9 +578,11 @@ async def cb_room_timers(callback: CallbackQuery, callback_data: RoomCB) -> None
 
 @router.callback_query(RoomCB.filter(F.action == "timer"))
 async def cb_room_timer_set(
-    callback: CallbackQuery, callback_data: RoomCB, services
+    callback: CallbackQuery, callback_data: RoomCB, services, db_user
 ) -> None:
-    phase, _, raw_delta = callback_data.value.partition(":")
+    # значение вида "night.+30": "." — не разделитель CallbackData
+    # (двоеточие в value невозможно — pack() отклоняет его)
+    phase, _, raw_delta = callback_data.value.partition(".")
     delta = int(raw_delta)
     key = f"{phase}_seconds"
 
@@ -582,7 +591,7 @@ async def cb_room_timer_set(
         setattr(settings, key, max(30, min(600, current + delta)))
         return settings
 
-    room, message = await services.rooms.update_settings(callback_data.room_id, callback.from_user.id, mutate)
+    room, message = await services.rooms.update_settings(callback_data.room_id, db_user.id, mutate)
     if room is None:
         await callback.answer(message, show_alert=True)
         return
@@ -601,12 +610,12 @@ async def cb_room_timer_set(
 
 
 @router.callback_query(RoomCB.filter(F.action == "tie"))
-async def cb_room_tie(callback: CallbackQuery, callback_data: RoomCB, services) -> None:
+async def cb_room_tie(callback: CallbackQuery, callback_data: RoomCB, services, db_user) -> None:
     def mutate(settings: RoomSettings) -> RoomSettings:
         settings.tie_rule = "no_death" if settings.tie_rule == "revote" else "revote"
         return settings
 
-    room, _ = await services.rooms.update_settings(callback_data.room_id, callback.from_user.id, mutate)
+    room, _ = await services.rooms.update_settings(callback_data.room_id, db_user.id, mutate)
     if room is None:
         await callback.answer("Недоступно", show_alert=True)
         return
@@ -617,12 +626,12 @@ async def cb_room_tie(callback: CallbackQuery, callback_data: RoomCB, services) 
 
 
 @router.callback_query(RoomCB.filter(F.action == "reveal"))
-async def cb_room_reveal(callback: CallbackQuery, callback_data: RoomCB, services) -> None:
+async def cb_room_reveal(callback: CallbackQuery, callback_data: RoomCB, services, db_user) -> None:
     def mutate(settings: RoomSettings) -> RoomSettings:
         settings.reveal_roles_on_death = not settings.reveal_roles_on_death
         return settings
 
-    room, _ = await services.rooms.update_settings(callback_data.room_id, callback.from_user.id, mutate)
+    room, _ = await services.rooms.update_settings(callback_data.room_id, db_user.id, mutate)
     if room is None:
         await callback.answer("Недоступно", show_alert=True)
         return

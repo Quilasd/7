@@ -138,7 +138,7 @@ async def _run_wizard(services, db_user, *, group, name="Тест комната
         for _ in range(delta):
             await call(rm.cb_role_inc, callback=FakeCB(db_user.telegram_id),
                        callback_data=RoomCB(action="roleinc", room_id=0, value=role_id),
-                       services=services, state=state)
+                       services=services, state=state, db_user=db_user)
     await call(rm.cb_settings_done, callback=FakeCB(db_user.telegram_id),
                callback_data=RoomCB(action="settings_done", room_id=0),
                state=state, services=services, db_user=db_user)
