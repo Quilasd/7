@@ -457,7 +457,7 @@ class FriendRequest(Base):
 
 
 class Friendship(Base):
-    """Состоявшаяся дружба (двунаправленная логически, хранится одной строкой)."""
+    """Состоявшаяся дружба: две строки (A→B и B→A), снимаются парой."""
 
     __tablename__ = "friendships"
     __table_args__ = (
@@ -487,7 +487,7 @@ class UserBlock(Base):
 
 
 class FavoritePlayer(Base):
-    """Избранные игроки (отдельно от друзей)."""
+    """Избранные игроки: только друзья (правило — SocialService.favorite)."""
 
     __tablename__ = "favorite_players"
     __table_args__ = (

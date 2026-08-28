@@ -13,6 +13,7 @@ from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from bot.database.repositories.games import GamePlayerRepository
 from bot.database.repositories.rooms import RoomPlayerRepository, RoomRepository
 from bot.services.lookup import UserLookupService
 from bot.utils.callbacks import SocialCB
@@ -201,6 +202,9 @@ async def cmd_invite(message: Message, command: CommandObject, session, services
     if target.id == db_user.id:
         await message.answer("Нельзя пригласить самого себя.")
         return
+    if target.is_test:
+        await message.answer("Это тестовый игрок — его нельзя пригласить.")
+        return
     # игнор: нельзя пригласить, кого игнорируешь, или кто игнорирует тебя
     if await services.social.is_blocked(db_user.id, target.id):
         await message.answer("Ты добавил этого игрока в игнор — сначала убери: /unignore.")
@@ -213,13 +217,21 @@ async def cmd_invite(message: Message, command: CommandObject, session, services
     if room is None:
         await message.answer("У тебя нет открытой комнаты для приглашения. Сначала создай комнату.")
         return
-    if room.player_count >= room.max_players:
+    if room.player_count() >= room.max_players:
         await message.answer(f"Комната #{room.id} уже заполнена ({room.max_players}).")
         return
     # нельзя пригласить того, кто уже в комнате
     already = await RoomPlayerRepository(session).get_membership(room.id, target.id)
     if already is not None:
         await message.answer(f"{esc(display_name(target))} уже в твоей комнате #{room.id}.")
+        return
+    # цель уже сидит в другой комнате или играет — приглашение бессмысленно
+    other_room = await RoomRepository(session).open_room_of_user(target.id)
+    if other_room is not None and other_room.id != room.id:
+        await message.answer(f"{esc(display_name(target))} уже в комнате #{other_room.id}.")
+        return
+    if await GamePlayerRepository(session).active_game_of_user(target.id):
+        await message.answer(f"{esc(display_name(target))} сейчас в игре.")
         return
     if target.is_banned:
         await message.answer("Этот игрок заблокирован и не может участвовать в играх.")

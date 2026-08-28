@@ -99,12 +99,12 @@ class TestFavorites:
     async def test_add_remove_list(self, services, session):
         a = await make_user(session, "Alice")
         b = await make_user(session, "Bob")
+        await services.social.send_request(a.id, b.id)   # избранное — только для друзей
+        await services.social.accept_request(b.id, a.id)
         ok, _ = await services.social.favorite(a.id, b.id)
         assert ok
         favs = await services.social.favorites_of(a.id)
         assert [u.id for u in favs] == [b.id]
-        # не авто-друзья
-        assert not await services.social.are_friends(a.id, b.id)
         ok, _ = await services.social.unfavorite(a.id, b.id)
         assert ok
         assert await services.social.favorites_of(a.id) == []
@@ -113,6 +113,8 @@ class TestFavorites:
         a = await make_user(session, "Alice")
         b = await make_user(session, "Bob")
         assert not (await services.social.favorite(a.id, a.id))[0]
+        await services.social.send_request(a.id, b.id)   # избранное — только для друзей
+        await services.social.accept_request(b.id, a.id)
         await services.social.favorite(a.id, b.id)
         ok, msg = await services.social.favorite(a.id, b.id)
         assert not ok
