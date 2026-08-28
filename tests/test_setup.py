@@ -459,6 +459,7 @@ class TestOnboarding:
     """Автоматическое сообщение при добавлении бота в группу."""
 
     async def test_added_sends_welcome(self, services, session):
+        """TEST 1: бот добавлен без прав — инструкция + понятное «нужны права»."""
         event = FakeMemberUpdated(-400120, "Новая группа", "member")
         bot = FakeSetupBot(-400120, bot_status="member", bot_can_manage_topics=False)
         await sp.on_bot_added(event, bot=bot, session=session, services=services)
@@ -468,15 +469,40 @@ class TestOnboarding:
         assert "Mafia Online добавлен" in text
         assert "/setup" in text
         assert "права администратора" in text
+        # автоматическая проверка: конкретная причина + что делать
+        assert "Бот пока не может работать" in text
+        assert "повторите /setup" in text
+
+    async def test_added_admin_without_manage_topics(self, services, session):
+        """Автопроверка после добавления: админ, но нет управления темами."""
+        event = FakeMemberUpdated(-400121, "Группа", "administrator")
+        bot = FakeSetupBot(-400121, bot_status="administrator",
+                           bot_can_manage_topics=False)
+        await sp.on_bot_added(event, bot=bot, session=session, services=services)
+        _, text = bot.sent[0]
+        assert "Не хватает права «Управление темами»" in text
+        assert "повторите /setup" in text
+
+    async def test_added_forum_topics_disabled(self, services, session):
+        """Автопроверка после добавления: права есть, темы отключены."""
+        event = FakeMemberUpdated(-400122, "Группа", "administrator")
+        bot = FakeSetupBot(-400122, bot_status="administrator",
+                           bot_can_manage_topics=True, is_forum=False)
+        await sp.on_bot_added(event, bot=bot, session=session, services=services)
+        _, text = bot.sent[0]
+        assert "не включены темы форума" in text
+        assert "Включите «Темы»" in text
+        assert "повторите /setup" in text
 
     async def test_added_with_full_rights_hint(self, services, session):
-        """Бота сразу добавили с полными правами — подсказка «выполните /setup»."""
+        """Автопроверка после добавления: всё готово — предложение /setup."""
         event = FakeMemberUpdated(-400130, "Группа", "administrator")
         bot = FakeSetupBot(-400130, bot_status="administrator",
                            bot_can_manage_topics=True)
         await sp.on_bot_added(event, bot=bot, session=session, services=services)
         _, text = bot.sent[0]
-        assert "выполните /setup" in text
+        assert "готов к работе в этой группе" in text
+        assert "выполнить /setup" in text
 
     async def test_readd_no_duplicates(self, services, session):
         """TEST 5/13: повторное добавление — та же запись группы, без дублей."""

@@ -315,6 +315,7 @@ class GameChatService:
 
         room_name = await self._room_name(session, game)
         label = (room_name or "Игра").strip()[:24]
+        failed = False
         if game_forum:
             name = f"🎮 Игра #{game.id} — {label}"
             thread_id = await self.gateway.create_topic(
@@ -333,6 +334,7 @@ class GameChatService:
                 )
                 logger.info("Игра %s: Game Topic %s/%s", game.id, game_forum, thread_id)
             else:
+                failed = True
                 logger.warning("Игра %s: не удалось создать Game Topic", game.id)
         if mafia_forum:
             name = f"🌙 Игра #{game.id} — {label}"
@@ -342,7 +344,14 @@ class GameChatService:
                 game.mafia_thread_id = thread_id
                 logger.info("Игра %s: Mafia Topic %s/%s", game.id, mafia_forum, thread_id)
             else:
+                failed = True
                 logger.warning("Игра %s: не удалось создать Mafia Topic", game.id)
+
+        if failed:
+            # ТЗ §6: права могли отозвать после настройки — бот не падает,
+            # партия продолжается в ЛС; администраторам группы — понятная
+            # ошибка с предложением вернуть право и повторить /setup.
+            await self._notify_topics_failed(session, game)
         await session.flush()
 
     async def on_night_started(self, session, game: Game, players) -> None:
@@ -623,6 +632,34 @@ class GameChatService:
         return result
 
     # ------------------------------------------------------------ внутренние
+
+    async def _notify_topics_failed(self, session, game: Game) -> None:
+        """Тема партии не создана (обычно отозвано право управления темами).
+
+        Сообщение в ОСНОВНУЮ группу игры — админам: что не так, что сделать,
+        как проверить (/setup). Best-effort: сбой отправки не ломает игру.
+        """
+        if not game.group_id:
+            return
+        try:
+            from bot.database.repositories.groups import GroupRepository
+
+            group = await GroupRepository(session).get(game.group_id)
+            if group is None:
+                return
+            await self.gateway.send(
+                group.telegram_chat_id,
+                "⚠️ <b>Mafia Online не удалось создать тему партии.</b>\n\n"
+                "Вероятно, у бота нет права «Управление темами» в форумном чате.\n\n"
+                "👉 Попросите администратора вернуть это право и повторите "
+                "<code>/setup</code> в основной группе.\n\n"
+                "Партия продолжается в личных чатах с ботом — ничего не потеряно.",
+            )
+        except Exception as exc:  # отправка не критична
+            logger.warning(
+                "Игра %s: не удалось предупредить группу о провале тем: %s",
+                game.id, exc,
+            )
 
     @staticmethod
     async def _room_name(session, game: Game) -> str | None:

@@ -935,3 +935,98 @@ class TestGroupForumSettings:
         # группа без настроенных форумов — (None, None), НЕ глобальные
         group2 = await self._group(services, session, -700700, "GF2")
         assert await provider.get_for(session, group2.id) == (None, None)
+
+
+class TestTopicsFailureWarning:
+    """ТЗ §6/TEST 7: право управления темами отозвали — бот не падает,
+    партия продолжается, админам группы — понятная ошибка с /setup."""
+
+    async def test_failed_topic_creates_warning_in_main_group(
+        self, session_factory, notifier, session
+    ):
+        from bot.database.models import Room as RoomModel, RoomPlayer
+        from bot.database.repositories.groups import (
+            GroupRepository,
+            GroupSettingsRepository,
+        )
+        from bot.services.game_chat import GameChatService, StaticForumProvider
+
+        class NoTopicsGateway(FakeForumGateway):
+            """Форум недоступен: create_topic всегда проваливается."""
+
+            async def create_topic(self, chat_id, name, icon_color=None):
+                return None
+
+        from bot.services.app_config import AppConfigService
+        from bot.services.game_chat import DbForumProvider
+        from tests.conftest import SettingsStub
+
+        gw = NoTopicsGateway()
+        game_chats = GameChatService(
+            session_factory, gw, notifier,
+            forums=DbForumProvider(
+                AppConfigService(session_factory, SettingsStub()),
+                SettingsStub(),
+            ),
+        )
+        from bot.services.game_manager import GameManager
+        from bot.services.phase_manager import GameLocks, PhaseManager
+        from bot.services.rating import RatingService
+        from bot.services.timer_manager import NoopTimerManager
+
+        phases = PhaseManager(
+            session_factory, notifier, NoopTimerManager(), GameLocks(),
+            rating=RatingService(), app_settings=None, game_chats=game_chats,
+        )
+        games = GameManager(
+            session_factory, notifier, phases, GameLocks(), game_chats=game_chats
+        )
+
+        group = await GroupRepository(session).get_or_create(-500100, "Основная")
+        gs = await GroupSettingsRepository(session).get_or_create(group.id)
+        gs.game_forum_chat_id = GAME_FORUM
+        gs.mafia_forum_chat_id = MAFIA_FORUM
+        users = [await make_user(session, f"F{i}") for i in range(1, 5)]
+        room = RoomModel(
+            creator_id=users[0].id, name="Комната отказа", max_players=10,
+            min_players=4, is_private=False, status="OPEN",
+            settings={
+                "roles": {"mafia": 1, "detective": 1, "doctor": 1},
+                "night_seconds": 60, "day_seconds": 60, "vote_seconds": 30,
+                "start_countdown_seconds": 0, "tie_rule": "revote",
+                "reveal_roles_on_death": True,
+            },
+            group_id=group.id,
+        )
+        session.add(room)
+        await session.flush()
+        for u in users:
+            session.add(RoomPlayer(room_id=room.id, user_id=u.id, is_ready=True))
+        await session.commit()
+
+        res = await games.start_game_from_room(room.id, users[0].id)
+        assert res.ok, res.message  # игра стартовала, бот НЕ упал
+
+        # игра без тем (thread_id None), но предупреждение ушло в основную группу
+        async with session_factory() as s:
+            from bot.database.repositories.rooms import RoomRepository
+
+            game_id = (await RoomRepository(s).get(room.id)).game_id
+            from bot.database.repositories.games import GameRepository
+
+            game = await GameRepository(s).get(game_id)
+            assert game.game_thread_id is None
+            assert game.mafia_thread_id is None
+        warned = [t for c, th, t in gw.sent if c == -500100 and th is None]
+        assert warned and "не удалось создать тему партии" in warned[0]
+        assert "/setup" in warned[0]
+        assert "Управление темами" in warned[0]
+
+    async def test_successful_topics_no_warning(self, chat_services, session):
+        """При успешном создании тем предупреждение НЕ отправляется."""
+        game_id, users, *_ = await _new_game(chat_services, session, "OK")
+        game = await _game(chat_services, game_id)
+        gw = chat_services.gateway
+        # все отправки — только в форумы с thread_id
+        assert all(th is not None for _c, th, _t in gw.sent)
+        assert game.game_thread_id is not None

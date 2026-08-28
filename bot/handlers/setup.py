@@ -149,6 +149,34 @@ async def cmd_setup(message: Message, session, services, db_user, group=None, bo
     await message.answer(_render_report(check, group.title or check.title))
 
 
+def _autocheck_lines(check) -> str:
+    """Результат автоматической проверки после добавления (ТЗ §2).
+
+    Конкретная причина по приоритету: админ → право тем → сами темы;
+    при полном порядке — «готов к работе» с предложением /setup.
+    """
+    if not check.is_admin:
+        return (
+            "❌ Бот пока не может работать.\n\n"
+            "Необходимо выдать Mafia Online права администратора.\n"
+            "После выдачи прав повторите /setup."
+        )
+    if not check.can_manage_topics:
+        return (
+            "❌ Не хватает права «Управление темами».\n\n"
+            "Выдайте боту право на управление темами и повторите /setup."
+        )
+    if not check.is_forum:
+        return (
+            "❌ В этой группе не включены темы форума.\n\n"
+            "Включите «Темы» в настройках группы и повторите /setup."
+        )
+    return (
+        "✅ Mafia Online готов к работе в этой группе!\n\n"
+        "Можно выполнить /setup для завершения настройки."
+    )
+
+
 # ------------------------------------------------------------ onboarding
 
 
@@ -182,32 +210,23 @@ async def on_bot_added(event: ChatMemberUpdated, bot: Bot, session, services) ->
         await s.commit()
 
     try:
+        # автоматическая проверка текущего состояния (ТЗ §2)
+        check = await services.setup.check(bot, chat_id)
         if was_setup:
             # повторное добавление уже настроенной группы: актуальный статус
-            check = await services.setup.check(bot, chat_id)
             text = (
                 "🤖 <b>Mafia Online снова в группе!</b>\n\n"
                 "Настройки этой группы сохранены.\n\n"
                 + _render_report(check, chat_title)
             )
-            await bot.send_message(chat_id, text, reply_markup=_check_kb())
         else:
-            # первичное добавление: инструкция + быстрая автопроверка
-            check = await services.setup.check(bot, chat_id)
-            extra = ""
-            if check.is_admin and check.can_manage_topics and check.is_forum:
-                extra = (
-                    "\n\n✅ Права уже выданы — выполните /setup, "
-                    "чтобы завершить настройку."
-                )
-            elif check.is_admin:
-                extra = (
-                    "\n\n⚠️ Бот уже администратор, но для полноценной работы "
-                    "нужны «Темы» и право «Управление темами»."
-                )
-            await bot.send_message(
-                chat_id, WELCOME_TEXT + extra, reply_markup=_check_kb()
+            # первичное добавление: инструкция + результат автопроверки
+            text = (
+                WELCOME_TEXT
+                + "\n\n⚙️ <b>Автоматическая проверка:</b>\n\n"
+                + _autocheck_lines(check)
             )
+        await bot.send_message(chat_id, text, reply_markup=_check_kb())
         logger.info("Onboarding: сообщение отправлено в группу %s", chat_id)
     except Exception as exc:
         # бот мог не успеть получить права на отправку сообщений — это норма
