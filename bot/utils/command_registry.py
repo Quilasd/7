@@ -41,6 +41,10 @@ class CommandMeta:
     in_private: bool = True            # работает в ЛС
     visible_to_users: bool = False     # показывать в /cmdhelp
     note: str = ""                     # примечание к команде
+    # Telegram-алиасы той же команды (один handler, несколько имён):
+    # в справке показывается основное имя, инвариант полноты реестра
+    # сверяет их все (tests/test_command_registry.py).
+    aliases: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------- категории
@@ -83,7 +87,9 @@ PLAYER_COMMANDS: list[CommandMeta] = [
     CommandMeta("profile", "профиль: 🌐 глобально + 🏠 группа", "profile", visible_to_users=True),
     CommandMeta("stats", "моя статистика", "profile", visible_to_users=True),
     CommandMeta("achievements", "мои достижения", "profile", visible_to_users=True),
-    CommandMeta("top", "рейтинги: 🌐 глобальный / 🏠 группы", "profile", visible_to_users=True),
+    CommandMeta("top", "рейтинги: 🌐 глобальный / 🏠 группы", "profile",
+                visible_to_users=True,
+                aliases=("top_rating", "top_wins", "top_levels")),
     CommandMeta("history", "история моих игр", "profile", visible_to_users=True),
     CommandMeta("level_info", "таблица уровней и XP", "profile", visible_to_users=True),
     CommandMeta(
@@ -98,16 +104,22 @@ PLAYER_COMMANDS: list[CommandMeta] = [
     CommandMeta("reward_activate", "активировать награду", "badges", visible_to_users=True),
     # социальные
     CommandMeta("friends", "список друзей", "social", visible_to_users=True),
-    CommandMeta("friend", "добавить друга", "social", visible_to_users=True),
+    CommandMeta("friend", "добавить друга", "social", visible_to_users=True,
+                aliases=("addfriend", "fadd")),
     CommandMeta("requests", "запросы дружбы", "social", visible_to_users=True),
     CommandMeta("accept", "принять запрос дружбы", "social", visible_to_users=True),
     CommandMeta("decline", "отклонить запрос дружбы", "social", visible_to_users=True),
-    CommandMeta("unfriend", "удалить из друзей", "social", visible_to_users=True),
+    CommandMeta("unfriend", "удалить из друзей", "social", visible_to_users=True,
+                aliases=("fremove",)),
     CommandMeta("favorites", "избранные игроки", "social", visible_to_users=True),
-    CommandMeta("favorite", "добавить в избранное", "social", visible_to_users=True),
-    CommandMeta("unfavorite", "убрать из избранного", "social", visible_to_users=True),
-    CommandMeta("ignore", "добавить в игнор", "social", visible_to_users=True),
-    CommandMeta("unignore", "убрать из игнора", "social", visible_to_users=True),
+    CommandMeta("favorite", "добавить в избранное", "social", visible_to_users=True,
+                aliases=("fav",)),
+    CommandMeta("unfavorite", "убрать из избранное", "social", visible_to_users=True,
+                aliases=("unfav",)),
+    CommandMeta("ignore", "добавить в игнор", "social", visible_to_users=True,
+                aliases=("block",)),
+    CommandMeta("unignore", "убрать из игнора", "social", visible_to_users=True,
+                aliases=("unblock",)),
     CommandMeta("ignored", "список игнора", "social", visible_to_users=True),
     CommandMeta("invite", "пригласить в свою комнату", "social", visible_to_users=True),
     # игра
@@ -137,6 +149,30 @@ ADMIN_COMMANDS: list[CommandMeta] = [
         permission=Permission.MANAGE_SETTINGS, in_private=False,
     ),
     CommandMeta(
+        "set_min_players", "минимум игроков группы", "setup",
+        permission=Permission.MANAGE_SETTINGS, in_private=False,
+    ),
+    CommandMeta(
+        "set_max_players", "максимум игроков группы", "setup",
+        permission=Permission.MANAGE_SETTINGS, in_private=False,
+    ),
+    CommandMeta(
+        "set_night_time", "длительность ночи группы (сек)", "setup",
+        permission=Permission.MANAGE_SETTINGS, in_private=False,
+    ),
+    CommandMeta(
+        "set_day_time", "длительность дня группы (сек)", "setup",
+        permission=Permission.MANAGE_SETTINGS, in_private=False,
+    ),
+    CommandMeta(
+        "set_vote_time", "длительность голосования группы (сек)", "setup",
+        permission=Permission.MANAGE_SETTINGS, in_private=False,
+    ),
+    CommandMeta(
+        "acmdhelp", "административная справка", "setup",
+        level=1, scope="any",
+    ),
+    CommandMeta(
         "set_game_forum", "форум партий игры этой группы", "setup",
         permission=Permission.MANAGE_SETTINGS, in_private=False,
     ),
@@ -148,6 +184,7 @@ ADMIN_COMMANDS: list[CommandMeta] = [
     CommandMeta(
         "player", "профиль игрока (ID/@username/ответ)", "moderation",
         permission=Permission.VIEW_PROFILE, in_private=False,
+        aliases=("player_stats",),
     ),
     CommandMeta(
         "players", "игроки группы", "moderation",
@@ -197,15 +234,18 @@ ADMIN_COMMANDS: list[CommandMeta] = [
     CommandMeta(
         "staff_add", "назначить админа: /staff_add ID 3", "staff",
         permission=Permission.MANAGE_STAFF, in_private=False,
+        aliases=("staff_promote",),
     ),
     CommandMeta(
         "staff_remove", "снять админа", "staff",
         permission=Permission.MANAGE_STAFF, in_private=False,
+        aliases=("staff_demote",),
     ),
     # игры и комнаты
     CommandMeta(
         "game", "активные игры группы", "games",
         permission=Permission.VIEW_STATS, in_private=False,
+        aliases=("games", "game_info"),
     ),
     CommandMeta(
         "game_players", "состав партии", "games",
@@ -218,15 +258,17 @@ ADMIN_COMMANDS: list[CommandMeta] = [
     CommandMeta(
         "game_stop", "остановить игру", "games",
         permission=Permission.STOP_GAME, in_private=False,
+        aliases=("game_cancel",),
     ),
     CommandMeta(
         "game_kill", "убить/оживить игрока (отладка)", "games",
         permission=Permission.MANAGE_ROOMS, in_private=False,
-        note="требуется DEBUG",
+        note="требуется DEBUG", aliases=("game_revive",),
     ),
     CommandMeta(
         "rooms", "комнаты группы", "games",
         permission=Permission.VIEW_STATS, in_private=False,
+        aliases=("room",),
     ),
     CommandMeta(
         "createroom", "комната с правилами группы", "games",
@@ -243,6 +285,7 @@ ADMIN_COMMANDS: list[CommandMeta] = [
     CommandMeta(
         "room_force_start", "принудительный старт комнаты", "games",
         permission=Permission.START_GAME, in_private=False,
+        aliases=("game_start",),
     ),
     CommandMeta(
         "testgame", "тестовая игра с ботами", "games",
@@ -253,6 +296,7 @@ ADMIN_COMMANDS: list[CommandMeta] = [
         "debug", "debug-инструменты партий", "games",
         permission=Permission.USE_DEBUG, scope="any",
         note="требуется DEBUG MODE / debug группы",
+        aliases=("debug_game", "debug_state", "debug_phase", "debug_finish_phase"),
     ),
     # информация
     CommandMeta(
@@ -262,6 +306,7 @@ ADMIN_COMMANDS: list[CommandMeta] = [
     CommandMeta(
         "broadcast", "объявление в группу", "info",
         permission=Permission.BROADCAST, in_private=False,
+        aliases=("announce",),
     ),
     CommandMeta(
         "logs", "последние действия (аудит)", "info",
@@ -321,8 +366,10 @@ ADMIN_COMMANDS: list[CommandMeta] = [
         level=5, scope="global",
     ),
     CommandMeta(
-        "set_rating", "изменить рейтинг игрока (+add_rating, set_wins, set_xp, set_level)",
+        "set_rating", "изменить рейтинг игрока",
         "global", level=5, scope="global",
+        aliases=("add_rating", "set_wins", "add_wins", "set_xp", "add_xp",
+                 "set_level"),
     ),
 ]
 

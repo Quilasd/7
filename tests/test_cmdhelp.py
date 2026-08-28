@@ -15,9 +15,6 @@ TEST 1–20 из ТЗ:
 
 from __future__ import annotations
 
-import re
-from pathlib import Path
-
 import pytest
 
 from bot.handlers import cmdhelp as ch
@@ -135,7 +132,8 @@ class TestAcmdhelpLevels:
         assert "АДМИНИСТРАТИВНЫЕ КОМАНДЫ" in text
         assert "Lv.1" in text  # уровень пользователя указан
         for cmd in ("players", "player", "mute", "unmute", "staff", "staff_info",
-                    "game", "rooms", "botstats", "game_players", "game_phase"):
+                    "game", "rooms", "botstats", "game_players", "game_phase",
+                    "acmdhelp"):
             assert f"/{cmd}" in text, cmd
         for hidden in ("warn", "kick", "ban", "settings", "staff_add",
                        "game_stop", "owner", "admin", "maintenance"):
@@ -392,21 +390,21 @@ class TestCallbacksAndRegistry:
         assert SetupCB(action="check").pack().startswith("setup:")
 
     def test_all_registry_commands_exist_in_handlers(self):
-        """TEST 19: каждая команда реестра реально зарегистрирована."""
-        src = ""
-        for path in Path("bot/handlers").glob("*.py"):
-            src += path.read_text(encoding="utf-8")
-        registered: set[str] = set()
-        if "CommandStart()" in src:  # /start регистрируется CommandStart
-            registered.add("start")
-        for args in re.findall(r"Command\(([^)]*)\)", src):
-            registered.update(re.findall(r'"([a-z_0-9]+)"', args))
-        missing_player = [m.command for m in PLAYER_COMMANDS
-                          if m.command not in registered]
-        missing_admin = [m.command for m in ADMIN_COMMANDS
-                         if m.command not in registered]
-        assert not missing_player, missing_player
-        assert not missing_admin, missing_admin
+        """TEST 19: каждая команда реестра реально зарегистрирована.
+
+        Полный двусторонний инвариант (REAL → REGISTRY и REGISTRY → REAL,
+        включая алиасы) живёт в tests/test_command_registry.py; здесь —
+        быстрая проверка основного направления через фактическое дерево
+        роутеров aiogram (никакого regex-поиска по исходникам).
+        """
+        from tests.test_command_registry import (
+            collect_registered_commands,
+            registry_names,
+        )
+
+        registered = collect_registered_commands()
+        assert not (registry_names() - registered), \
+            sorted(registry_names() - registered)
 
     def test_registry_levels_match_permissions(self):
         """TEST 20: порог уровня команды = минимальный уровень с этим правом

@@ -587,6 +587,26 @@ DEBUG_AFFECTS_LOCAL_STATS=false    # true — тест-игры меняют Л�
 `bot/handlers/testgame.py`. Поведение ботов детерминировано
 (RNG с seed от `game_id` и номера дня) — тесты воспроизводимы.
 
+## Автоматическая проверка полноты Command Registry
+
+Реестр команд (`bot/utils/command_registry.py`) сверяется с фактической
+регистрацией в aiogram автоматически: `tests/test_command_registry.py`
+обходит дерево роутеров (`FilterObject.callback` → `Command`-фильтры,
+`CommandStart` ⊂ `Command`) и инвариантами проверяет:
+
+- **REAL → REGISTRY** — каждая зарегистрированная команда описана в реестре
+  (иначе тест падает со списком `Registered commands missing from registry:
+  /newcommand … Please add them to bot/utils/command_registry.py`);
+- **REGISTRY → REAL** — «призрачных» записей нет;
+- **дубликаты** в реестре запрещены (алиасы — не дубли);
+- **механизм** проверен синтетическими роутерами (§ ТЗ): забыли мету — тест
+  видит команду; добавили — проходит; удалили хендлер — чисто.
+
+Мультиимённые команды описываются полем `aliases` (например,
+`top` = `top_rating`/`top_wins`/`top_levels`), нормализация: `/Test@bot` →
+`test`. Никакого regex-поиска строк по исходникам: README, тексты сообщений,
+`callback_data` и комментарии командами не считаются.
+
 ## Тесты
 
 ```bash
