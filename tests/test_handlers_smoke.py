@@ -11,7 +11,7 @@ import bot.handlers.groups_admin as ga
 import bot.handlers.testgame as tg
 import bot.handlers.ratings as rt
 from bot.database.repositories.groups import GroupAdminRepository
-from bot.services.permissions import AdminLevel
+from bot.services.permissions import AdminLevel, Permission
 from bot.utils.callbacks import SettingCB
 from tests.conftest import make_user
 
@@ -34,8 +34,9 @@ class FakeChat:
 class FakeBot:
     """ Telegram-бот: restrict_chat_member либо успех, либо TelegramAPIError."""
 
-    def __init__(self, fail: bool = False) -> None:
+    def __init__(self, fail: bool = False, member_status: str = "member") -> None:
         self.fail = fail
+        self.member_status = member_status
         self.calls: list[dict] = []
 
     async def restrict_chat_member(self, **kwargs) -> bool:
@@ -44,6 +45,38 @@ class FakeBot:
         self.calls.append(kwargs)
         if self.fail:
             raise TelegramAPIError(method="restrictChatMember", message="not enough rights")
+        return True
+
+    async def get_chat_member(self, *, chat_id: int, user_id: int):
+        """Возвращает объект с .status для проверки создателя группы (/claim)."""
+        from types import SimpleNamespace
+
+        from aiogram.exceptions import TelegramAPIError
+
+        self.calls.append({"chat_id": chat_id, "user_id": user_id})
+        if self.fail:
+            raise TelegramAPIError(method="getChatMember", message="forbidden")
+        return SimpleNamespace(status=self.member_status)
+
+    async def ban_chat_member(self, chat_id: int, user_id: int, until_date=None, **kw) -> bool:
+        """Telegram-бан (до until_date, если задан)."""
+        self.calls.append({"method": "ban_chat_member", "chat_id": chat_id,
+                           "user_id": user_id, "until_date": until_date})
+        if self.fail:
+            raise TelegramAPIError(method="banChatMember", message="not enough rights")
+        return True
+
+    async def unban_chat_member(self, chat_id: int, user_id: int, only_if_banned: bool = False, **kw) -> bool:
+        """Telegram-разбан."""
+        self.calls.append({"method": "unban_chat_member", "chat_id": chat_id,
+                           "user_id": user_id, "only_if_banned": only_if_banned})
+        if self.fail:
+            raise TelegramAPIError(method="unbanChatMember", message="not enough rights")
+        return True
+
+    async def set_my_commands(self, commands, scope=None) -> bool:
+        """Регистрация меню «/» — записываем вызов для проверок в тестах."""
+        self.calls.append({"method": "set_my_commands", "commands": commands, "scope": scope})
         return True
 
 
@@ -166,7 +199,7 @@ class TestModerationCommands:
         msg = FakeMessage(FakeTgUser(mod.telegram_id), "/warn",
                           chat=FakeChat(group.telegram_chat_id), reply=reply)
         await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
-        assert any("выдано предупреждение" in t for t in msg.answers)
+        assert any("предупреждение" in t and "1/3" in t for t in msg.answers)
         gp = await services.groups.local_player(group.id, noisy.id)
         assert gp is not None and gp.warnings == 1
 
@@ -186,7 +219,7 @@ class TestModerationCommands:
         await _set_staff(services.session_factory, group.id, mod.id, 2)
 
         reply = FakeMessage(FakeTgUser(noisy.telegram_id), "спам")
-        for fail, expected in ((False, "мут на 60"), (True, "нужны права админа")):
+        for fail, expected in ((False, "мут на 1 час"), (True, "нужны права админа")):
             msg = FakeMessage(FakeTgUser(mod.telegram_id), "/mute",
                               chat=FakeChat(group.telegram_chat_id), reply=reply,
                               bot=FakeBot(fail=fail))
@@ -210,7 +243,8 @@ class TestSettingsCommand:
         msg = FakeMessage(FakeTgUser(boss.telegram_id), "/settings",
                           chat=FakeChat(group.telegram_chat_id))
         await ga.cmd_settings(msg, session=session, group=group, services=services)
-        assert any("НАСТРОЙКИ ГРУППЫ" in t for t in msg.answers)
+        assert any("НАСТРОЙКИ MAFIA ONLINE" in t for t in msg.answers)
+        assert any("Не настроен" in t for t in msg.answers)  # /setup ещё не выполнен
         assert msg.keyboards[0] is not None
 
     async def test_settings_private_chat_rejected(self, services, session):
@@ -302,6 +336,191 @@ class TestStaffCommands:
                           chat=FakeChat(group.telegram_chat_id))
         await ga.cmd_staff(msg, session=session, group=group, services=services)
         assert any("Senior" in t or "штаб пуст" in t for t in msg.answers)
+
+
+class TestClaimCommand:
+    async def test_claim_creator_gets_senior_and_audit(self, services, session):
+        creator = await make_user(session, "Creator")
+        group = await services.groups.get_or_create(-603000, "A")
+        bot = FakeBot(member_status="creator")
+        msg = FakeMessage(FakeTgUser(creator.telegram_id), "/claim",
+                          chat=FakeChat(group.telegram_chat_id), bot=bot)
+        await ga.cmd_claim(msg, session=session, group=group, services=services, db_user=creator)
+
+        # ответ про выдачу Senior Admin
+        assert any("Senior Admin" in t for t in msg.answers)
+        # уровень 4 в группе
+        assert await services.permissions.group_level(
+            session, group.id, creator.telegram_id) == AdminLevel.SENIOR_ADMIN
+        # появилось право MANAGE_SETTINGS
+        access = await services.permissions.resolve(session, creator.telegram_id, group.id)
+        assert Permission.MANAGE_SETTINGS in access.permissions
+        # в аудите записано действие group_claim (actor == target == creator)
+        logs = await services.audit.last(group_id=group.id, limit=5)
+        entry = next((log for log in logs if log.action == "group_claim"), None)
+        assert entry is not None
+        assert entry.actor_id == creator.id
+        assert entry.target_id == creator.id
+        assert "was 0" in entry.details
+        # создателю зарегистрировано админ-меню группы (scope ChatMember)
+        menu_calls = [c for c in bot.calls if c.get("method") == "set_my_commands"]
+        assert menu_calls, "set_my_commands должен вызываться после /claim"
+        cmd_names = [c.command for c in menu_calls[-1]["commands"]]
+        assert "settings" in cmd_names and "staff_add" in cmd_names
+
+    async def test_claim_non_creator_denied(self, services, session):
+        member = await make_user(session, "Member")
+        group = await services.groups.get_or_create(-603100, "A")
+        bot = FakeBot(member_status="member")
+        msg = FakeMessage(FakeTgUser(member.telegram_id), "/claim",
+                          chat=FakeChat(group.telegram_chat_id), bot=bot)
+        await ga.cmd_claim(msg, session=session, group=group, services=services, db_user=member)
+        assert any("только создатель" in t.lower() for t in msg.answers)
+        # уровень не изменился
+        assert await services.permissions.group_level(
+            session, group.id, member.telegram_id) == AdminLevel.PLAYER
+
+    async def test_claim_private_chat_denied(self, services, session):
+        creator = await make_user(session, "Creator")
+        msg = FakeMessage(FakeTgUser(creator.telegram_id), "/claim")
+        await ga.cmd_claim(msg, session=session, group=None, services=services, db_user=creator)
+        assert any("только внутри группы" in t for t in msg.answers)
+
+    async def test_claim_already_senior_is_noop(self, services, session):
+        senior = await make_user(session, "Senior")
+        group = await services.groups.get_or_create(-603200, "A")
+        await _set_staff(services.session_factory, group.id, senior.id, 4)
+        bot = FakeBot(member_status="creator")
+        msg = FakeMessage(FakeTgUser(senior.telegram_id), "/claim",
+                          chat=FakeChat(group.telegram_chat_id), bot=bot)
+        await ga.cmd_claim(msg, session=session, group=group, services=services, db_user=senior)
+        assert any("уже есть права" in t for t in msg.answers)
+        # прямой вызов сервиса на уже-Senior — тоже no-op, без ошибки
+        ok, result = await services.groups.claim_creator(group.id, senior.id)
+        assert ok is False and result == "уже есть права"
+
+
+class TestCommandsMenu:
+    async def test_set_member_admin_commands(self):
+        import bot.utils.commands_menu as menu
+
+        class B:
+            def __init__(self):
+                self.last = None
+
+            async def set_my_commands(self, commands, scope=None):
+                self.last = (commands, scope)
+
+        bot = B()
+        await menu.set_member_commands(bot, chat_id=-100, user_id=42, is_group_admin=True)
+        commands, scope = bot.last
+        names = [c.command for c in commands]
+        # базовые групповые + админские команды группы
+        assert "claim" in names and "settings" in names and "staff_add" in names
+        assert scope is not None  # scope передан (ChatMember)
+
+    async def test_set_member_non_admin_is_base_only(self):
+        import bot.utils.commands_menu as menu
+
+        class B:
+            def __init__(self):
+                self.last = None
+
+            async def set_my_commands(self, commands, scope=None):
+                self.last = (commands, scope)
+
+        bot = B()
+        await menu.set_member_commands(bot, chat_id=-100, user_id=42, is_group_admin=False)
+        names = [c.command for c in bot.last[0]]
+        assert "settings" not in names and "staff_add" not in names
+        assert "top" in names and "claim" in names  # базовый набор группы
+
+    def test_admin_commands_includes_claim_and_staff(self):
+        import bot.utils.commands_menu as menu
+
+        names = {c.command for c in menu.ADMIN_COMMANDS}
+        for required in ("claim", "staff_add", "staff_remove", "staff_info",
+                         "unmute", "unban", "set_roles", "game_stop"):
+            assert required in names, required
+
+
+class TestUsageHints:
+    """Пустые команды (без аргументов) должны показывать пример использования."""
+
+    async def _boss_group(self, services, session, tag):
+        boss = await make_user(session, "Boss" + tag)
+        group = await services.groups.get_or_create(-(604000 + int(tag)), "A")
+        await _set_staff(services.session_factory, group.id, boss.id, 4)
+        return boss, group
+
+    async def test_staff_add_empty_shows_example(self, services, session):
+        boss, group = await self._boss_group(services, session, "1")
+        msg = FakeMessage(FakeTgUser(boss.telegram_id), "/staff_add",
+                          chat=FakeChat(group.telegram_chat_id))
+        await ga.cmd_staff_add(msg, FakeCommandObject(None, "staff_add"), session=session,
+                               group=group, services=services, db_user=boss)
+        joined = "\n".join(msg.answers)
+        assert "Формат" in joined and "Пример" in joined
+        assert "staff_add" in joined and "@username" in joined
+        assert "Senior Admin" in joined  # легенда уровней
+
+    async def test_staff_remove_empty_shows_example(self, services, session):
+        boss, group = await self._boss_group(services, session, "2")
+        msg = FakeMessage(FakeTgUser(boss.telegram_id), "/staff_remove",
+                          chat=FakeChat(group.telegram_chat_id))
+        await ga.cmd_staff_remove(msg, FakeCommandObject(None, "staff_remove"), session=session,
+                                  group=group, services=services, db_user=boss)
+        joined = "\n".join(msg.answers)
+        assert "Формат" in joined and "Пример" in joined
+        assert "staff_remove" in joined
+
+    async def test_staff_info_empty_shows_example(self, services, session):
+        boss, group = await self._boss_group(services, session, "3")
+        msg = FakeMessage(FakeTgUser(boss.telegram_id), "/staff_info",
+                          chat=FakeChat(group.telegram_chat_id))
+        await ga.cmd_staff_info(msg, FakeCommandObject(None, "staff_info"), session=session,
+                                group=group, services=services)
+        joined = "\n".join(msg.answers)
+        assert "Формат" in joined and "Пример" in joined
+        assert "staff_info" in joined
+
+    async def test_set_night_time_empty_shows_range_and_example(self, services, session):
+        boss, group = await self._boss_group(services, session, "4")
+        msg = FakeMessage(FakeTgUser(boss.telegram_id), "/set_night_time abc",
+                          chat=FakeChat(group.telegram_chat_id))
+        await ga.cmd_set_number(msg, FakeCommandObject("abc", "set_night_time"), session=session,
+                                group=group, services=services, db_user=boss)
+        joined = "\n".join(msg.answers)
+        assert "Формат" in joined and "Пример" in joined
+        assert "30" in joined and "600" in joined  # диапазон
+
+    async def test_set_roles_empty_shows_example(self, services, session):
+        boss, group = await self._boss_group(services, session, "5")
+        msg = FakeMessage(FakeTgUser(boss.telegram_id), "/set_roles",
+                          chat=FakeChat(group.telegram_chat_id))
+        await ga.cmd_set_roles(msg, FakeCommandObject(None, "set_roles"), session=session,
+                               group=group, services=services, db_user=boss)
+        joined = "\n".join(msg.answers)
+        assert "Формат" in joined and "Пример" in joined
+        assert "mafia" in joined and "maniac" in joined
+
+    async def test_warn_empty_shows_example(self, services, session):
+        mod, group = await self._boss_group(services, session, "6")
+        msg = FakeMessage(FakeTgUser(mod.telegram_id), "/warn",
+                          chat=FakeChat(group.telegram_chat_id))
+        await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+        joined = "\n".join(msg.answers)
+        assert "Пример" in joined and "@username" in joined
+
+    async def test_room_kick_empty_shows_example(self, services, session):
+        boss, group = await self._boss_group(services, session, "7")
+        msg = FakeMessage(FakeTgUser(boss.telegram_id), "/room_kick",
+                          chat=FakeChat(group.telegram_chat_id))
+        await ga.cmd_room_manage(msg, FakeCommandObject(None, "room_kick"), session=session,
+                                 group=group, services=services, db_user=boss)
+        joined = "\n".join(msg.answers)
+        assert "Формат" in joined and "Пример" in joined
+        assert "room_kick" in joined
 
 
 class TestSystemCommands:
@@ -464,3 +683,601 @@ class TestRatingsHandlers:
         msg2 = FakeMessage(FakeTgUser(player.telegram_id), "/global_stats")
         await rt.cmd_global_stats(msg2, session=session)
         assert msg.answers and msg2.answers
+
+
+# ------------------------------------------------ регрессия кнопки «Профиль»
+
+import inspect
+
+import bot.handlers.profile as pf
+from bot.database.repositories.groups import GroupPlayerRepository
+
+
+async def call_like_aiogram(handler, **data):
+    """Вызов хендлера ровно так, как это делает aiogram: только параметры,
+    объявленные в сигнатуре (DI по имени). Ловит NameError вида
+    «используется services, которого нет в сигнатуре» — регрессия кнопки профиля."""
+    sig = inspect.signature(handler)
+    kwargs = {k: v for k, v in data.items() if k in sig.parameters}
+    await handler(**kwargs)
+
+
+class TestProfileButtonRegression:
+    """Кнопка 👤 Профиль (MenuCB action=profile) сломалась: cb_profile вызывал
+    services, не объявив его в сигнатуре -> NameError на каждом нажатии."""
+
+    async def test_profile_callback_no_crash_private(self, services, session, monkeypatch):
+        user = await make_user(session, "Hero")
+        captured: dict = {}
+
+        async def fake_edit(cb, text, kb=None):
+            captured["text"] = text
+
+        monkeypatch.setattr(pf, "edit_or_answer", fake_edit)
+        cb = FakeCallback(FakeTgUser(user.telegram_id))
+        # до фикса: services не в сигнатуре -> NameError внутри хендлера
+        await call_like_aiogram(
+            pf.cb_profile, callback=cb, session=session, services=services,
+            db_user=user, group=None,
+        )
+        assert "ГЛОБАЛЬНО" in captured["text"]
+
+    async def test_profile_callback_global_and_local_scopes(self, services, session, monkeypatch):
+        """Профиль обязан показывать ОБА рейтинга: 🌐 глобальный и 🏠 этой группы
+        (существующая система global/local), включая локальные позиции в топе."""
+        user = await make_user(session, "Hero")
+        user.rating, user.wins, user.level, user.xp = 1428, 47, 12, 500
+
+        group = await services.groups.get_or_create(-604200, "Клуб")
+        gp = await GroupPlayerRepository(session).ensure(group.id, user.id)
+        gp.rating, gp.wins, gp.level, gp.xp = 386, 14, 7, 200
+        other = await make_user(session, "Rival")
+        gp2 = await GroupPlayerRepository(session).ensure(group.id, other.id)
+        gp2.rating, gp2.wins, gp2.level, gp2.xp = 100, 2, 2, 50
+        await session.commit()
+
+        captured: dict = {}
+
+        async def fake_edit(cb, text, kb=None):
+            captured["text"] = text
+
+        monkeypatch.setattr(pf, "edit_or_answer", fake_edit)
+        cb = FakeCallback(FakeTgUser(user.telegram_id))
+        await call_like_aiogram(
+            pf.cb_profile, callback=cb, session=session, services=services,
+            db_user=user, group=group,
+        )
+        text = captured["text"]
+        # глобальный scope
+        assert "ГЛОБАЛЬНО" in text
+        assert "⭐ Общий: <b>1428</b>" in text
+        assert "(#" in text
+        # локальный scope (не заменён глобальным!) — компактный блок
+        assert "В ЭТОЙ ГРУППЕ" in text
+        assert "Клуб" in text                       # название группы
+        assert "⭐ <b>386</b> <code>(#1)</code>" in text
+        assert "🏆 <b>14</b> <code>(#1)</code>" in text
+        assert "📈 Ур. <b>7</b> <code>(#1)</code>" in text
+        # локальный блок НЕ дублирует глобальную статистику
+        assert "Winrate" not in text.split("В ЭТОЙ ГРУППЕ")[1]
+        assert "Серия" not in text.split("В ЭТОЙ ГРУППЕ")[1]
+        # глобальный блок на месте и не смешан с локальным
+        assert "⭐ Общий: <b>1428</b>" in text
+        # игровая статистика — отдельным блоком внизу
+        assert "В ИГРЕ" in text and "☠️ Убийств" in text
+
+    async def test_profile_command_and_settings_callback_ok(self, services, session, monkeypatch):
+        """Соседние точки входа профиля (/profile, кнопка Настройки) не регрессировали."""
+        user = await make_user(session, "Hero")
+        msg = FakeMessage(FakeTgUser(user.telegram_id), "/profile")
+        await call_like_aiogram(
+            pf.cmd_profile, message=msg, command=FakeCommandObject(None),
+            session=session, services=services, db_user=user,
+        )
+        assert msg.answers and "ГЛОБАЛЬНО" in msg.answers[0]
+
+        captured: dict = {}
+
+        async def fake_edit(cb, text, kb=None):
+            captured["text"] = text
+
+        monkeypatch.setattr(pf, "edit_or_answer", fake_edit)
+        cb = FakeCallback(FakeTgUser(user.telegram_id))
+        await call_like_aiogram(
+            pf.cb_settings, callback=cb, session=session, services=services, db_user=user,
+        )
+        assert "ГЛОБАЛЬНО" in captured["text"]
+
+    async def test_group_block_without_ranks_still_renders(self):
+        """profile_group_block работает и без рангов (обратная совместимость)."""
+        from types import SimpleNamespace
+
+        gp = SimpleNamespace(rating=10, wins=3, losses=1, level=2, xp=40,
+                             games_played=4, kills=0, saves=0, investigations=0,
+                             correct_votes=0, win_streak=1, best_win_streak=2)
+        group = SimpleNamespace(title="G")
+        text = pf.profile_group_block(group, gp)
+        assert "В ЭТОЙ ГРУППЕ" in text and "G" in text
+        assert "⭐ <b>10</b>" in text and "🏆 <b>3</b>" in text and "Ур. <b>2</b>" in text
+        # без дублирования глобальной статистики
+        assert "XP" not in text and "Winrate" not in text
+
+
+# ------------------------------------------------------- модерация 2.0 (A+B)
+
+class TestModerationV2Rights:
+    """Новое распределение прав: мут — Helper, варн/кик/врембан — Moderator,
+    постоянный бан/разбан — Admin. Плюс защита иерархии."""
+
+    async def test_helper_can_mute_cannot_warn(self, services, session):
+        helper = await make_user(session, "H")
+        noisy = await make_user(session, "N")
+        group = await services.groups.get_or_create(-605000, "A")
+        await _set_staff(services.session_factory, group.id, helper.id, 1)
+
+        reply = FakeMessage(FakeTgUser(noisy.telegram_id), "x")
+        mmsg = FakeMessage(FakeTgUser(helper.telegram_id), "/mute",
+                           chat=FakeChat(group.telegram_chat_id), reply=reply,
+                           bot=FakeBot())
+        await ga.cmd_mute(mmsg, session=session, group=group, db_user=helper, services=services)
+        assert any("мут" in t for t in mmsg.answers)
+
+        wmsg = FakeMessage(FakeTgUser(helper.telegram_id), "/warn",
+                           chat=FakeChat(group.telegram_chat_id), reply=FakeMessage(
+                               FakeTgUser(noisy.telegram_id), "x"))
+        await ga.cmd_warns(wmsg, session=session, group=group, db_user=helper, services=services)
+        assert any("WARN_PLAYER" in t for t in wmsg.answers)  # варна у Helper больше нет
+
+    async def test_mod_has_no_ban_access_at_all(self, services, session):
+        """У модератора доступа к бану НЕТ — только варн/кик/мут."""
+        mod = await make_user(session, "M")
+        bad = await make_user(session, "B")
+        group = await services.groups.get_or_create(-605100, "A")
+        await _set_staff(services.session_factory, group.id, mod.id, 2)
+
+        reply = FakeMessage(FakeTgUser(bad.telegram_id), "x")
+        msg = FakeMessage(FakeTgUser(mod.telegram_id), "/ban",
+                          chat=FakeChat(group.telegram_chat_id), reply=reply, bot=FakeBot())
+        await ga.cmd_ban(msg, session=session, group=group, db_user=mod, services=services)
+        assert any("BAN_PLAYER" in t for t in msg.answers)  # отказ по праву
+        gp = await services.groups.local_player(group.id, bad.id)
+        assert gp is None or not gp.is_banned  # бана не случилось
+
+        pmsg = FakeMessage(FakeTgUser(bad.telegram_id), "/ban",
+                           chat=FakeChat(group.telegram_chat_id),
+                           reply=FakeMessage(FakeTgUser(mod.telegram_id), "x"), bot=FakeBot())
+        await ga.cmd_ban(pmsg, session=session, group=group, db_user=bad, services=services)
+        assert any("BAN_PLAYER" in t for t in pmsg.answers)  # обычный игрок тоже не может
+
+    async def test_admin_ban_durations_all_units(self, services, session):
+        """Админ: 30m / 2h / 3d / 1w / 2mo; без времени — навсегда."""
+        from datetime import timedelta
+
+        from bot.utils.helpers import utcnow
+
+        admin = await make_user(session, "A")
+        bad = await make_user(session, "B")
+        group = await services.groups.get_or_create(-605200, "A")
+        await _set_staff(services.session_factory, group.id, admin.id, 3)
+
+        cases = [("30m", 30), ("2h", 120), ("3d", 3 * 24 * 60),
+                 ("1w", 7 * 24 * 60), ("2mo", 60 * 24 * 60)]
+        for token, minutes in cases:
+            msg = FakeMessage(FakeTgUser(admin.telegram_id), f"/ban {bad.telegram_id} {token}",
+                              chat=FakeChat(group.telegram_chat_id), bot=FakeBot())
+            await ga.cmd_ban(msg, session=session, group=group, db_user=admin, services=services)
+            gp = await services.groups.local_player(group.id, bad.id)
+            got = (gp.banned_until - utcnow()).total_seconds() / 60
+            assert abs(got - minutes) < 1, (token, got, minutes)
+            assert any("навсегда" not in t for t in msg.answers), token
+
+        # без времени — навсегда
+        msg = FakeMessage(FakeTgUser(admin.telegram_id), f"/ban {bad.telegram_id}",
+                          chat=FakeChat(group.telegram_chat_id), bot=FakeBot())
+        await ga.cmd_ban(msg, session=session, group=group, db_user=admin, services=services)
+        assert any("навсегда" in t for t in msg.answers)
+        gp = await services.groups.local_player(group.id, bad.id)
+        assert gp.is_banned and gp.banned_until is None
+
+    async def test_admin_ban_permanent_and_unban_lifts_telegram(self, services, session):
+        admin = await make_user(session, "A")
+        bad = await make_user(session, "B")
+        group = await services.groups.get_or_create(-605300, "A")
+        await _set_staff(services.session_factory, group.id, admin.id, 3)
+
+        bot = FakeBot()
+        msg = FakeMessage(FakeTgUser(admin.telegram_id), f"/ban {bad.telegram_id}",
+                          chat=FakeChat(group.telegram_chat_id), bot=bot)
+        await ga.cmd_ban(msg, session=session, group=group, db_user=admin, services=services)
+        assert any("навсегда" in t for t in msg.answers)
+        gp = await services.groups.local_player(group.id, bad.id)
+        assert gp.is_banned and gp.banned_until is None
+        assert any(c["method"] == "ban_chat_member" for c in bot.calls)
+
+        umsg = FakeMessage(FakeTgUser(admin.telegram_id), f"/unban {bad.telegram_id}",
+                           chat=FakeChat(group.telegram_chat_id), bot=bot)
+        await ga.cmd_ban(umsg, session=session, group=group, db_user=admin, services=services)
+        assert any("разбанен" in t for t in umsg.answers)
+        gp = await services.groups.local_player(group.id, bad.id)
+        assert not gp.is_banned
+        unban = [c for c in bot.calls if c["method"] == "unban_chat_member"]
+        assert unban and unban[0]["only_if_banned"] is True
+
+    async def test_hierarchy_mod_cannot_punish_mod_or_admin(self, services, session):
+        mod = await make_user(session, "M1")
+        mod2 = await make_user(session, "M2")
+        admin = await make_user(session, "A")
+        group = await services.groups.get_or_create(-605400, "A")
+        await _set_staff(services.session_factory, group.id, mod.id, 2)
+        await _set_staff(services.session_factory, group.id, mod2.id, 2)
+        await _set_staff(services.session_factory, group.id, admin.id, 3)
+
+        for target, cmd in ((mod2, "/warn"), (admin, "/kick")):
+            msg = FakeMessage(FakeTgUser(mod.telegram_id), cmd,
+                              chat=FakeChat(group.telegram_chat_id),
+                              reply=FakeMessage(FakeTgUser(target.telegram_id), "x"),
+                              bot=FakeBot())
+            if cmd == "/warn":
+                await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+            else:
+                await ga.cmd_kick(msg, session=session, group=group, db_user=mod, services=services)
+            assert any("выше или равным" in t for t in msg.answers), cmd
+        # бан модеру недоступен вовсе — отказ по праву, а не по иерархии
+        bmsg = FakeMessage(FakeTgUser(mod.telegram_id), f"/ban {mod2.telegram_id}",
+                           chat=FakeChat(group.telegram_chat_id), bot=FakeBot())
+        await ga.cmd_ban(bmsg, session=session, group=group, db_user=mod, services=services)
+        assert any("BAN_PLAYER" in t for t in bmsg.answers)
+
+        # админ МОЖЕТ карать модератора; нельзя карать себя
+        kmsg = FakeMessage(FakeTgUser(admin.telegram_id), "/kick",
+                           chat=FakeChat(group.telegram_chat_id),
+                           reply=FakeMessage(FakeTgUser(mod.telegram_id), "x"), bot=FakeBot())
+        await ga.cmd_kick(kmsg, session=session, group=group, db_user=admin, services=services)
+        assert any("исключён" in t for t in kmsg.answers)
+
+        smsg = FakeMessage(FakeTgUser(admin.telegram_id), "/warn",
+                           chat=FakeChat(group.telegram_chat_id),
+                           reply=FakeMessage(FakeTgUser(admin.telegram_id), "x"))
+        await ga.cmd_warns(smsg, session=session, group=group, db_user=admin, services=services)
+        assert any("самому себе" in t for t in smsg.answers)
+
+
+class TestWarnV2:
+    """Варн с причиной/сроком; 3/3 -> авто-бан на время; /warnings со списком."""
+
+    async def test_warn_with_reason_and_duration(self, services, session):
+        mod = await make_user(session, "M")
+        noisy = await make_user(session, "N")
+        group = await services.groups.get_or_create(-606000, "A")
+        await _set_staff(services.session_factory, group.id, mod.id, 2)
+
+        msg = FakeMessage(FakeTgUser(mod.telegram_id), f"/warn {noisy.telegram_id} 3d спам в чате",
+                          chat=FakeChat(group.telegram_chat_id), bot=FakeBot())
+        await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+        assert any("1/3" in t and "спам в чате" in t for t in msg.answers)
+        warns = await services.groups.warnings_of(group.id, noisy.id)
+        assert len(warns) == 1 and warns[0].reason == "спам в чате"
+        hours = (warns[0].expires_at - warns[0].created_at).total_seconds() / 3600
+        assert abs(hours - 72) < 0.01  # 3 дня
+
+    async def test_three_warns_auto_ban(self, services, session):
+        mod = await make_user(session, "M")
+        noisy = await make_user(session, "N")
+        group = await services.groups.get_or_create(-606100, "A")
+        await _set_staff(services.session_factory, group.id, mod.id, 2)
+
+        bot = FakeBot()
+        for i in range(3):
+            msg = FakeMessage(FakeTgUser(mod.telegram_id), f"/warn {noisy.telegram_id}",
+                              chat=FakeChat(group.telegram_chat_id), bot=bot)
+            await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+        assert any("3/3" in t and "авто-бан" in t for t in msg.answers)
+        gp = await services.groups.local_player(group.id, noisy.id)
+        assert gp.is_banned and gp.banned_until is not None  # бан на время (24 ч по умолч.)
+        bans = [c for c in bot.calls if c["method"] == "ban_chat_member"]
+        assert bans and bans[0]["until_date"] is not None    # Telegram-бан со сроком
+        assert gp.warnings == 0                              # варны израсходованы
+        assert await services.groups.warnings_of(group.id, noisy.id) == []
+
+    async def test_warnings_lists_active_with_reasons(self, services, session):
+        mod = await make_user(session, "M")
+        noisy = await make_user(session, "N")
+        group = await services.groups.get_or_create(-606200, "A")
+        await _set_staff(services.session_factory, group.id, mod.id, 2)
+
+        await services.groups.warn(group.id, noisy.id, mod.id, reason="флуд")
+        msg = FakeMessage(FakeTgUser(mod.telegram_id), f"/warnings {noisy.telegram_id}",
+                          chat=FakeChat(group.telegram_chat_id))
+        await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+        assert any("1/3" in t and "флуд" in t for t in msg.answers)
+
+    async def test_unwarn_removes_last(self, services, session):
+        mod = await make_user(session, "M")
+        noisy = await make_user(session, "N")
+        group = await services.groups.get_or_create(-606300, "A")
+        await _set_staff(services.session_factory, group.id, mod.id, 2)
+
+        await services.groups.warn(group.id, noisy.id, mod.id, reason="1")
+        await services.groups.warn(group.id, noisy.id, mod.id, reason="2")
+        msg = FakeMessage(FakeTgUser(mod.telegram_id), "/unwarn",
+                          chat=FakeChat(group.telegram_chat_id),
+                          reply=FakeMessage(FakeTgUser(noisy.telegram_id), "x"))
+        await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+        assert any("Активных: 1" in t for t in msg.answers)
+        left = await services.groups.warnings_of(group.id, noisy.id)
+        assert len(left) == 1 and left[0].reason == "1"
+
+
+class TestDurationUnits:
+    """Единые единицы срока: 30m / 2h / 3d / 1w / 2mo (и по-русски: мин/ч/д/нед/мес)."""
+
+    async def test_mute_with_units(self, services, session):
+        from datetime import datetime, timezone
+
+        helper = await make_user(session, "H")
+        noisy = await make_user(session, "N")
+        group = await services.groups.get_or_create(-607000, "A")
+        await _set_staff(services.session_factory, group.id, helper.id, 1)
+
+        for token, minutes in (("2h", 120), ("3d", 3 * 24 * 60), ("1mo", 30 * 24 * 60)):
+            bot = FakeBot()
+            msg = FakeMessage(FakeTgUser(helper.telegram_id), f"/mute {noisy.telegram_id} {token}",
+                              chat=FakeChat(group.telegram_chat_id), bot=bot)
+            await ga.cmd_mute(msg, session=session, group=group, db_user=helper, services=services)
+            calls = [c for c in bot.calls if c.get("method") != "set_my_commands"]
+            assert calls, token
+            until = calls[-1]["until_date"]
+            got = (until - datetime.now(timezone.utc)).total_seconds() / 60
+            assert abs(got - minutes) < 2, (token, got, minutes)
+            assert any("мут" in t for t in msg.answers)
+
+    async def test_mute_bare_number_still_minutes(self, services, session):
+        helper = await make_user(session, "H")
+        noisy = await make_user(session, "N")
+        group = await services.groups.get_or_create(-607100, "A")
+        await _set_staff(services.session_factory, group.id, helper.id, 1)
+
+        msg = FakeMessage(FakeTgUser(helper.telegram_id), f"/mute {noisy.telegram_id} 90",
+                          chat=FakeChat(group.telegram_chat_id), bot=FakeBot())
+        await ga.cmd_mute(msg, session=session, group=group, db_user=helper, services=services)
+        assert any("1 час 30 мин" in t for t in msg.answers)
+
+    async def test_warn_with_minute_duration(self, services, session):
+        mod = await make_user(session, "M")
+        noisy = await make_user(session, "N")
+        group = await services.groups.get_or_create(-607200, "A")
+        await _set_staff(services.session_factory, group.id, mod.id, 2)
+
+        msg = FakeMessage(FakeTgUser(mod.telegram_id), f"/warn {noisy.telegram_id} 30m флуд",
+                          chat=FakeChat(group.telegram_chat_id), bot=FakeBot())
+        await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+        assert any("1/3" in t and "флуд" in t and "30 мин" in t for t in msg.answers)
+        warns = await services.groups.warnings_of(group.id, noisy.id)
+        minutes = (warns[0].expires_at - warns[0].created_at).total_seconds() / 60
+        assert abs(minutes - 30) < 1
+
+    async def test_reban_updates_duration(self, services, session):
+        from bot.utils.helpers import utcnow
+
+        admin = await make_user(session, "A")
+        bad = await make_user(session, "B")
+        group = await services.groups.get_or_create(-607300, "A")
+        await _set_staff(services.session_factory, group.id, admin.id, 3)
+
+        # 30 минут, потом продлеваем до недели — срок должен обновиться
+        for token, minutes in (("30m", 30), ("1w", 7 * 24 * 60)):
+            msg = FakeMessage(FakeTgUser(admin.telegram_id), f"/ban {bad.telegram_id} {token}",
+                              chat=FakeChat(group.telegram_chat_id), bot=FakeBot())
+            await ga.cmd_ban(msg, session=session, group=group, db_user=admin, services=services)
+            gp = await services.groups.local_player(group.id, bad.id)
+            got = (gp.banned_until - utcnow()).total_seconds() / 60
+            assert abs(got - minutes) < 1, (token, got, minutes)
+
+    async def test_auto_ban_3_of_3_is_one_day(self, services, session):
+        from bot.utils.helpers import utcnow
+
+        mod = await make_user(session, "M")
+        noisy = await make_user(session, "N")
+        group = await services.groups.get_or_create(-607400, "A")
+        await _set_staff(services.session_factory, group.id, mod.id, 2)
+
+        msg = None
+        for _ in range(3):
+            msg = FakeMessage(FakeTgUser(mod.telegram_id), f"/warn {noisy.telegram_id}",
+                              chat=FakeChat(group.telegram_chat_id), bot=FakeBot())
+            await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+        assert any("3/3" in t and "авто-бан" in t and "1 день" in t for t in msg.answers)
+        gp = await services.groups.local_player(group.id, noisy.id)
+        minutes = (gp.banned_until - utcnow()).total_seconds() / 60
+        assert abs(minutes - 24 * 60) < 1  # ровно сутки
+
+
+class TestWarnIds:
+    """У каждого варна свой ID: /warnings показывает #ID, /unwarn снимает по ID."""
+
+    async def _three_warns(self, services, session, group, mod, noisy):
+        # ВНИМАНИЕ: 3-й варн = 3/3 -> авто-бан и сброс; для тестов ID нужно <3
+        for reason in ("спам", "флуд"):
+            msg = FakeMessage(FakeTgUser(mod.telegram_id), f"/warn {noisy.telegram_id} {reason}",
+                              chat=FakeChat(group.telegram_chat_id), bot=FakeBot())
+            await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+
+    async def test_warnings_shows_ids(self, services, session):
+        mod, noisy = await make_user(session, "M"), await make_user(session, "N")
+        group = await services.groups.get_or_create(-608000, "A")
+        await _set_staff(services.session_factory, group.id, mod.id, 2)
+        await self._three_warns(services, session, group, mod, noisy)
+
+        msg = FakeMessage(FakeTgUser(mod.telegram_id), f"/warnings {noisy.telegram_id}",
+                          chat=FakeChat(group.telegram_chat_id), bot=FakeBot())
+        await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+        warns = await services.groups.warnings_of(group.id, noisy.id)
+        assert len(warns) == 2
+        for w in warns:
+            assert any(f"#{w.id}" in t for t in msg.answers), w.id
+        assert any("/unwarn @user" in t for t in msg.answers)  # подсказка
+
+    async def test_unwarn_by_id_removes_exact_warn(self, services, session):
+        mod, noisy = await make_user(session, "M"), await make_user(session, "N")
+        group = await services.groups.get_or_create(-608100, "A")
+        await _set_staff(services.session_factory, group.id, mod.id, 2)
+        await self._three_warns(services, session, group, mod, noisy)
+        warns = await services.groups.warnings_of(group.id, noisy.id)
+        victim = warns[0]  # снимаем ПЕРВЫЙ, а не последний
+
+        msg = FakeMessage(FakeTgUser(mod.telegram_id), f"/unwarn {noisy.telegram_id} {victim.id}",
+                          chat=FakeChat(group.telegram_chat_id), bot=FakeBot())
+        await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+        assert any(f"#{victim.id}" in t and "Активных: 1" in t for t in msg.answers)
+        left = await services.groups.warnings_of(group.id, noisy.id)
+        assert len(left) == 1 and all(w.id != victim.id for w in left)
+
+    async def test_unwarn_wrong_id_says_not_found(self, services, session):
+        mod, noisy = await make_user(session, "M"), await make_user(session, "N")
+        group = await services.groups.get_or_create(-608200, "A")
+        await _set_staff(services.session_factory, group.id, mod.id, 2)
+        msg = FakeMessage(FakeTgUser(mod.telegram_id), f"/warn {noisy.telegram_id} спам",
+                          chat=FakeChat(group.telegram_chat_id), bot=FakeBot())
+        await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+
+        msg = FakeMessage(FakeTgUser(mod.telegram_id), f"/unwarn {noisy.telegram_id} 999999",
+                          chat=FakeChat(group.telegram_chat_id), bot=FakeBot())
+        await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+        assert any("нет активного варна" in t for t in msg.answers)
+        warns = await services.groups.warnings_of(group.id, noisy.id)
+        assert len(warns) == 1  # ничего не снято
+
+    async def test_unwarn_without_id_still_removes_last(self, services, session):
+        mod, noisy = await make_user(session, "M"), await make_user(session, "N")
+        group = await services.groups.get_or_create(-608300, "A")
+        await _set_staff(services.session_factory, group.id, mod.id, 2)
+        await self._three_warns(services, session, group, mod, noisy)
+        before = await services.groups.warnings_of(group.id, noisy.id)
+        last_id = before[-1].id
+
+        msg = FakeMessage(FakeTgUser(mod.telegram_id), f"/unwarn {noisy.telegram_id}",
+                          chat=FakeChat(group.telegram_chat_id), bot=FakeBot())
+        await ga.cmd_warns(msg, session=session, group=group, db_user=mod, services=services)
+        assert any("последнее предупреждение" in t and "Активных: 1" in t for t in msg.answers)
+        left = await services.groups.warnings_of(group.id, noisy.id)
+        assert len(left) == 1 and all(w.id != last_id for w in left)
+
+
+class TestAchievementsCommand:
+    """«0/12» в профиле без списка: /achievements показывает все достижения."""
+
+    async def test_achievements_empty_shows_all_and_hides_hidden(self, services, session):
+        user = await make_user(session, "Newbie")
+        msg = FakeMessage(FakeTgUser(user.telegram_id), "/achievements")
+        await pf.cmd_achievements(msg, session=session, db_user=user)
+        text = msg.answers[0]
+        assert "ДОСТИЖЕНИЯ" in text and "0/12" in text
+        # все 11 открытых достижений видны с описанием
+        for name in ("Первая кровь", "Спаситель", "Живой щит", "Верная догадка", "Охотник",
+                     "Верный приговор", "Последний выживший", "Идеальное алиби", "Город встал",
+                     "Неудержимый", "Легенда"):
+            assert name in text, name
+        # скрытое (Снайпер) замаскировано до получения
+        assert "Снайпер" not in text and "Скрытое достижение" in text
+        assert "⬜" in text and "✅" not in text
+
+    async def test_achievements_after_award_shows_check(self, services, session):
+        from bot.database.repositories.social import UserAchievementRepository
+
+        user = await make_user(session, "Winner")
+        await UserAchievementRepository(session).award(user.id, "first_win")
+        await UserAchievementRepository(session).award(user.id, "sharpshooter")
+        await session.commit()
+
+        msg = FakeMessage(FakeTgUser(user.telegram_id), "/achievements")
+        await pf.cmd_achievements(msg, session=session, db_user=user)
+        text = msg.answers[0]
+        assert "2/12" in text
+        assert "✅ 🎉 <b>Первая кровь</b>" in text   # полученное — галочка
+        assert "✅ 🔫 <b>Снайпер</b>" in text       # скрытое после получения видно
+        assert "⬜ 🔥 Неудержимый" in text          # неполученное — пустое место
+
+    async def test_profile_callback_achievements_button(self, services, session, monkeypatch):
+        """Кнопка 🏅 Достижения в профиле (ProfileCB action=achievements)."""
+        user = await make_user(session, "Clicker")
+        captured: dict = {}
+
+        async def fake_edit(cb, text, kb=None):
+            captured["text"] = text
+
+        monkeypatch.setattr(pf, "edit_or_answer", fake_edit)
+        cb = FakeCallback(FakeTgUser(user.telegram_id))
+        await call_like_aiogram(
+            pf.cb_achievements, callback=cb, session=session, services=services,
+            db_user=user, group=None,
+        )
+        assert "ДОСТИЖЕНИЯ" in captured["text"] and "0/12" in captured["text"]
+
+    async def test_profile_command_in_group_shows_local_block(self, services, session):
+        """Команда /profile в группе обязана показывать и блок 🏠 ЭТА ГРУППА."""
+        user = await make_user(session, "Hero")
+        group = await services.groups.get_or_create(-609000, "Клуб")
+        gp = await GroupPlayerRepository(session).ensure(group.id, user.id)
+        gp.rating, gp.wins, gp.level, gp.xp = 386, 14, 7, 200
+        await session.commit()
+
+        msg = FakeMessage(FakeTgUser(user.telegram_id), "/profile",
+                          chat=FakeChat(group.telegram_chat_id))
+        await call_like_aiogram(
+            pf.cmd_profile, message=msg, command=FakeCommandObject(None),
+            session=session, services=services, db_user=user, group=group,
+        )
+        text = msg.answers[0]
+        assert "ГЛОБАЛЬНО" in text and "В ЭТОЙ ГРУППЕ" in text
+        assert "⭐ <b>386</b>" in text          # компактный локальный блок
+        assert "⭐ Общий:" in text              # глобальный блок не пропал
+        assert "☠️ Убийств" in text            # игровая статистика внизу
+
+
+class TestMenuCallbacksSmoke:
+    """Регрессии кнопок главного меню: каждая вызывается без падений."""
+
+    async def test_main_menu_buttons_render(self, services, session, monkeypatch):
+        import bot.handlers.ratings as rt
+        import bot.handlers.rooms as rm
+        import bot.handlers.start as st
+
+        user = await make_user(session, "Clicker")
+        group = await services.groups.get_or_create(-611000, "G")
+        captured: list[str] = []
+
+        async def fake_edit(cb, text, kb=None):
+            captured.append(text)
+
+        for mod in (st, pf, rt, rm):
+            monkeypatch.setattr(mod, "edit_or_answer", fake_edit)
+
+        cases = [
+            (st.cb_main, dict(callback=FakeCallback(FakeTgUser(user.telegram_id)))),
+            (st.cb_rules, dict(callback=FakeCallback(FakeTgUser(user.telegram_id)))),
+            (st.cb_play, dict(callback=FakeCallback(FakeTgUser(user.telegram_id)),
+                              session=session, db_user=user)),
+            (pf.cb_settings, dict(callback=FakeCallback(FakeTgUser(user.telegram_id)),
+                                  session=session, services=services, db_user=user)),
+            (rt.cb_menu_rating, dict(callback=FakeCallback(FakeTgUser(user.telegram_id)),
+                                     session=session, group=None)),
+            (rt.cb_menu_rating, dict(callback=FakeCallback(FakeTgUser(user.telegram_id)),
+                                     session=session, group=group)),
+            (rm.cb_find_refresh, dict(callback=FakeCallback(FakeTgUser(user.telegram_id)),
+                                      session=session, db_user=user)),
+        ]
+        for handler, data in cases:
+            captured.clear()
+            cb = data["callback"]
+            cb.answers.clear()
+            await call_like_aiogram(handler, **data)
+            # что-то отрисовали (edit или answer) — не упало
+            assert captured or cb.answers, handler.__name__
+
+        # рейтинг в группе — локальный топ; в личке — глобальный (не смешиваются)
+        cb_group = FakeCallback(FakeTgUser(user.telegram_id))
+        await call_like_aiogram(rt.cb_menu_rating, callback=cb_group,
+                                session=session, group=group)
+        cb_private = FakeCallback(FakeTgUser(user.telegram_id))
+        await call_like_aiogram(rt.cb_menu_rating, callback=cb_private,
+                                session=session, group=None)

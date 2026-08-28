@@ -173,6 +173,30 @@ def rooms_list_kb(rooms: list[Room], user_room: Room | None) -> InlineKeyboardMa
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def play_empty_kb(in_group: bool) -> InlineKeyboardMarkup:
+    """Пустой экран «Играть»: действия вместо тупика.
+
+    «🏠 Создать комнату» ведёт в тот же полный визард, что и кнопка главного
+    меню (MenuCB create_room): в группе он создаёт комнату этой группы,
+    в ЛС — глобальную. «➕ По ID» — вход в существующую комнату по номеру.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    if in_group:
+        from bot.utils.callbacks import MenuCB
+
+        rows.append([
+            InlineKeyboardButton(
+                text="🏠 Создать комнату",
+                callback_data=MenuCB(action="create_room").pack(),
+            )
+        ])
+    rows.append([
+        InlineKeyboardButton(text="➕ По ID", callback_data=RoomCB(action="join_by_id", room_id=0).pack()),
+        InlineKeyboardButton(text="⬅️ В меню", callback_data=RoomCB(action="tomenu", room_id=0).pack()),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def confirm_kb(yes_cb: str, no_cb: str, yes_text: str = "✅ Подтвердить", no_text: str = "❌ Отмена") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text=yes_text, callback_data=yes_cb),

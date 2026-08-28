@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bot.database.models import Group, GroupAdmin, GroupPlayer, GroupSettingsModel, Room, RoomPlayer, RoomStatus
@@ -19,8 +20,27 @@ from bot.database.repositories.groups import (
 )
 from bot.database.repositories.rooms import RoomRepository
 from bot.services.permissions import AdminLevel, PermissionService
+from bot.utils.helpers import utcnow
 
 logger = logging.getLogger(__name__)
+
+
+async def effective_ban(session, group_id: int, user_id: int) -> tuple[bool, object | None]:
+    """(забанен ли сейчас, GroupPlayer). Лениво снимает истёкший временный бан.
+
+    Свободная функция — переиспользуется RoomService без создания GroupService.
+    """
+    from bot.database.repositories.groups import GroupPlayerRepository
+
+    gp = await GroupPlayerRepository(session).get_membership(group_id, user_id)
+    if gp is None:
+        return False, None
+    if gp.is_banned and gp.banned_until is not None and gp.banned_until <= utcnow():
+        gp.is_banned = False
+        gp.banned_until = None
+        await session.commit()
+        return False, gp
+    return gp.is_banned, gp
 
 
 class GroupService:
@@ -150,6 +170,40 @@ class GroupService:
             await session.commit()
         return True, "Администратор снят."
 
+    async def claim_creator(self, group_id: int, user_id: int) -> tuple[bool, str]:
+        """Выдаёт Senior Admin (4) реальному создателю группы по /claim.
+
+        Хендлер уже проверил, что в Telegram вызывающий — создатель чата; здесь
+        остаётся только бизнес-логика уровня. Если уровень уже >= Senior Admin —
+        no-op. Действие пишется в аудит (actor == target == user).
+        """
+        from bot.database.repositories.groups import AuditLogRepository
+
+        async with self.session_factory() as session:
+            admins = GroupAdminRepository(session)
+            current = AdminLevel(await admins.level_of(group_id, user_id))
+            if current >= AdminLevel.SENIOR_ADMIN:
+                return False, "уже есть права"
+            await admins.set_level(
+                group_id, user_id, AdminLevel.SENIOR_ADMIN, created_by=0
+            )
+            await AuditLogRepository(session).log(
+                actor_id=user_id,
+                target_id=user_id,
+                group_id=group_id,
+                action="group_claim",
+                details=f"creator -> senior (was {current.value})",
+            )
+            await session.commit()
+        logger.info(
+            "Группа %s: %s забрал права создателя (был уровень %s)",
+            group_id, user_id, current.value,
+        )
+        return True, (
+            "👑 Ты создатель группы — выдан уровень 🎖 Senior Admin! "
+            "Управляй: /settings · /staff_add · /createroom · /top"
+        )
+
     # -------------------------------------------------------- топы группы
 
     async def local_top(
@@ -162,35 +216,181 @@ class GroupService:
         async with self.session_factory() as session:
             return await GroupPlayerRepository(session).get_membership(group_id, user_id)
 
-    async def warn(self, group_id: int, target_user_id: int, actor_user_id: int, delta: int = 1) -> int:
-        """Возвращает новое количество предупреждений."""
+    # -------------------------------------------------------- варны 2.0
+
+    async def warn(
+        self,
+        group_id: int,
+        target_user_id: int,
+        actor_user_id: int,
+        reason: str = "",
+        duration_minutes: int | None = None,
+    ) -> dict:
+        """Выдаёт варн с причиной и сроком действия.
+
+        Возвращает {count, limit, auto_ban_until, warn}. При count == limit
+        срабатывает авто-бан на GroupSettings.warn_ban_minutes, активные варны
+        израсходованы (revoked) и счётчик обнуляется.
+        """
+        from datetime import timedelta
+
+        from bot.database.models import GroupWarning
+        from bot.database.repositories.groups import AuditLogRepository, GroupSettingsRepository
+
+        async with self.session_factory() as session:
+            settings = await GroupSettingsRepository(session).get_for(group_id)
+            default_minutes = (settings.warn_expire_hours if settings else 168) * 60
+            expire_minutes = duration_minutes if duration_minutes is not None else default_minutes
+            limit = settings.warn_limit if settings else 3
+            ban_minutes = settings.warn_ban_minutes if settings else 1440
+
+            warn = GroupWarning(
+                group_id=group_id,
+                user_id=target_user_id,
+                actor_id=actor_user_id,
+                reason=(reason or "")[:500],
+                created_at=utcnow(),
+                expires_at=utcnow() + timedelta(minutes=max(1, expire_minutes)),
+            )
+            session.add(warn)
+
+            repo = GroupPlayerRepository(session)
+            gp = await repo.ensure(group_id, target_user_id)
+            # считаем АКТИВНЫЕ до вставки нового: ensure() делает flush,
+            # поэтому помечаем сессию без автофлаша на время подсчёта
+            import sqlalchemy as sa
+
+            result = await session.execute(
+                sa.select(GroupWarning.id)
+                .where(
+                    GroupWarning.group_id == group_id,
+                    GroupWarning.user_id == target_user_id,
+                    GroupWarning.revoked.is_(False),
+                    GroupWarning.expires_at > utcnow(),
+                    GroupWarning.id != warn.id,
+                )
+            )
+            count = len(result.all()) + 1
+
+            auto_ban_until = None
+            if count >= limit:
+                # 3/3: авто-бан на время, варны израсходованы
+                auto_ban_until = utcnow() + timedelta(minutes=ban_minutes)
+                gp.is_banned = True
+                gp.banned_until = auto_ban_until
+                from sqlalchemy import update as sa_update
+
+                await session.execute(
+                    sa_update(GroupWarning)
+                    .where(
+                        GroupWarning.group_id == group_id,
+                        GroupWarning.user_id == target_user_id,
+                        GroupWarning.revoked.is_(False),
+                    )
+                    .values(revoked=True)
+                )
+                count = 0
+
+            gp.warnings = count
+            await AuditLogRepository(session).log(
+                actor_id=actor_user_id, target_id=target_user_id, group_id=group_id,
+                action="warn", details=f"reason={warn.reason[:120]!r} count={count if not auto_ban_until else 'limit'}",
+            )
+            await session.commit()
+            return {
+                "count": count,
+                "limit": limit,
+                "auto_ban_until": auto_ban_until,
+                "ban_minutes": ban_minutes,
+                "warn": warn,
+            }
+
+    async def unwarn(
+        self, group_id: int, target_user_id: int, actor_user_id: int, warn_id: int | None = None
+    ) -> int | None:
+        """Снимает варн: конкретный по warn_id (ID варна) или последний активный.
+
+        Возвращает число оставшихся активных варнов.
+        None — если warn_id указан, но такого АКТИВНОГО варна у цели нет.
+        """
+        from bot.database.models import GroupWarning
         from bot.database.repositories.groups import AuditLogRepository
 
         async with self.session_factory() as session:
+            active = await self._active_warnings_of(session, group_id, target_user_id)
+            if warn_id is not None:
+                match = next((w for w in active if w.id == warn_id), None)
+                if match is None:
+                    return None
+                match.revoked = True
+                count = len(active) - 1
+            else:
+                if active:
+                    active[-1].revoked = True
+                count = len(active) - 1 if active else 0
             repo = GroupPlayerRepository(session)
             gp = await repo.ensure(group_id, target_user_id)
-            gp.warnings = max(0, gp.warnings + delta)
+            gp.warnings = max(0, count)
             await AuditLogRepository(session).log(
                 actor_id=actor_user_id, target_id=target_user_id, group_id=group_id,
-                action="warn" if delta > 0 else "unwarn", details=f"warnings={gp.warnings}",
+                action="unwarn", details=f"warnings={gp.warnings}",
             )
             await session.commit()
             return gp.warnings
 
+    async def _active_warnings_of(self, session, group_id: int, user_id: int) -> list:
+        """Активные (не отозванные, не истёкшие) варны, старые -> новые."""
+        from bot.database.models import GroupWarning
+
+        result = await session.execute(
+            select(GroupWarning)
+            .where(
+                GroupWarning.group_id == group_id,
+                GroupWarning.user_id == user_id,
+                GroupWarning.revoked.is_(False),
+                GroupWarning.expires_at > utcnow(),
+            )
+            .order_by(GroupWarning.created_at)
+        )
+        return list(result.scalars().unique().all())
+
+    async def _active_warns(self, session, group_id: int, user_id: int) -> int:
+        return len(await self._active_warnings_of(session, group_id, user_id))
+
+    async def warnings_of(self, group_id: int, user_id: int) -> list:
+        """Активные варны игрока (для /warnings)."""
+        async with self.session_factory() as session:
+            return await self._active_warnings_of(session, group_id, user_id)
+
+    async def effective_ban(
+        self, session, group_id: int, user_id: int
+    ) -> tuple[bool, object | None]:
+        """(забанен ли сейчас, GroupPlayer). Лениво снимает истёкший временный бан."""
+        return await effective_ban(session, group_id, user_id)
+
     async def set_local_ban(
-        self, group_id: int, target_user_id: int, banned: bool, actor_user_id: int
+        self,
+        group_id: int,
+        target_user_id: int,
+        banned: bool,
+        actor_user_id: int,
+        until=None,
     ) -> tuple[bool, str]:
+        """Локальный бан группы. until=None — навсегда, иначе временный."""
         from bot.database.repositories.groups import AuditLogRepository
 
         async with self.session_factory() as session:
             repo = GroupPlayerRepository(session)
             gp = await repo.ensure(group_id, target_user_id)
-            if gp.is_banned == banned:
+            if gp.is_banned == banned and (not banned or gp.banned_until == until):
                 return banned, "Уже в таком состоянии."
+            # повторный бан обновляет срок (например, продлить/сократить)
             gp.is_banned = banned
+            gp.banned_until = until if banned else None
             await AuditLogRepository(session).log(
                 actor_id=actor_user_id, target_id=target_user_id, group_id=group_id,
-                action="local_ban" if banned else "local_unban", details="",
+                action="local_ban" if banned else "local_unban",
+                details=f"until={until.isoformat() if until else 'perm'}",
             )
             await session.commit()
         return banned, "Локальный бан установлен." if banned else "Локальный бан снят."
@@ -203,6 +403,13 @@ class GroupService:
         """Комната с правилами группы (таймеры, роли, лимиты) и привязкой к ней."""
         from bot.services.rooms import RoomSettings
         from bot.services.role_manager import validate_setup
+
+        # забаненный в группе не может создавать в ней комнаты
+        async with self.session_factory() as session:
+            banned, gp = await self.effective_ban(session, group_id, creator_user_id)
+        if banned:
+            until = f" до {gp.banned_until:%d.%m.%Y %H:%M}" if gp and gp.banned_until else ""
+            return None, f"🚫 Ты забанен в этой группе{until}."
 
         settings = await self.get_settings(group_id)
 

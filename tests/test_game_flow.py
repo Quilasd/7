@@ -380,3 +380,352 @@ class TestRecovery:
         )
         count = await fresh_phases.recover()
         assert count == 1
+
+
+class TestDeathNote:
+    """Предсмертная записка: создание, неизменяемость, публикация утром."""
+
+    async def test_death_note_created_and_immutable(self, services, session, notifier):
+        from bot.database.repositories.social import DeathNoteRepository
+
+        users = [await make_user(session, f"P{i}") for i in range(1, 7)]
+        game_id = await _start_game(
+            services, session, users, roles_setup={"mafia": 1, "detective": 1, "doctor": 1}
+        )
+        roles = await _roles_map(services, game_id)
+        mafia_uid = next(uid for uid, r in roles.items() if r == "mafia")
+        victim_uid = next(uid for uid, r in roles.items() if r == "citizen")
+
+        await services.phases.begin_game(game_id)
+        await services.games.submit_night_action(game_id, mafia_uid, "kill", victim_uid)
+        await services.phases.end_night(game_id)  # жертва гибнет ночью
+
+        async with services.session_factory() as s:
+            note = await DeathNoteRepository(s).get(game_id, victim_uid)
+            assert note is not None
+            assert note.text is None          # placeholder, ещё не написана
+            assert note.published is False
+
+        # первая записка сохраняется
+        async with services.session_factory() as s:
+            saved = await DeathNoteRepository(s).set_text(game_id, victim_uid, "Это была мафия!")
+            await s.commit()
+            assert saved is not None and saved.text == "Это была мафия!"
+
+        # повторно изменить нельзя (неизменяемо)
+        async with services.session_factory() as s:
+            second = await DeathNoteRepository(s).set_text(game_id, victim_uid, "другой текст")
+            assert second is None
+
+    async def test_too_long_note_rejected(self, services, session):
+        from bot.database.repositories.social import DeathNoteRepository
+
+        users = [await make_user(session, f"P{i}") for i in range(1, 7)]
+        game_id = await _start_game(
+            services, session, users, roles_setup={"mafia": 1, "detective": 1, "doctor": 1}
+        )
+        roles = await _roles_map(services, game_id)
+        mafia_uid = next(uid for uid, r in roles.items() if r == "mafia")
+        victim_uid = next(uid for uid, r in roles.items() if r == "citizen")
+        await services.phases.begin_game(game_id)
+        await services.games.submit_night_action(game_id, mafia_uid, "kill", victim_uid)
+        await services.phases.end_night(game_id)
+
+        # длина > 300 → заголовком rejects на уровне хендлера; репо хранит как есть,
+        # но лимит 300 соблюдается бизнес-логикой хендлера (DEATH_NOTE_MAX).
+        text = "А" * 300
+        async with services.session_factory() as s:
+            saved = await DeathNoteRepository(s).set_text(game_id, victim_uid, text)
+            await s.commit()
+            assert saved is not None
+            assert len(saved.text) == 300
+
+    async def test_note_published_next_morning(self, services, session, notifier):
+        from bot.database.repositories.social import DeathNoteRepository
+
+        users = [await make_user(session, f"P{i}") for i in range(1, 7)]
+        game_id = await _start_game(
+            services, session, users, roles_setup={"mafia": 1, "detective": 1, "doctor": 1}
+        )
+        roles = await _roles_map(services, game_id)
+        mafia_uid = next(uid for uid, r in roles.items() if r == "mafia")
+        citizens = [uid for uid, r in roles.items() if r == "citizen"]
+        victim_uid, lynch_uid = citizens[0], citizens[1]
+
+        # --- Ночь 1: гибель жертвы, записка записана (death_day=1)
+        await services.phases.begin_game(game_id)
+        await services.games.submit_night_action(game_id, mafia_uid, "kill", victim_uid)
+        await services.phases.end_night(game_id)
+        async with services.session_factory() as s:
+            await DeathNoteRepository(s).set_text(game_id, victim_uid, "Запомните: это мафия!")
+            await s.commit()
+
+        # --- День 1: город линчует другого гражданина (игра продолжается)
+        await services.phases.begin_voting(game_id)
+        alive_city = [
+            uid for uid, r in roles.items()
+            if uid not in (victim_uid,) and r != "mafia"
+        ]
+        for uid in alive_city:
+            await services.games.cast_vote(game_id, uid, lynch_uid)
+        await services.phases.end_voting(game_id)  # линчеван → ночь 2 (без победы)
+
+        # записка ещё не опубликована (утро дня 1 уже прошло, она опубликуется утром дня 2)
+        async with services.session_factory() as s:
+            note = await DeathNoteRepository(s).get(game_id, victim_uid)
+            assert note.published is False
+
+        # --- Ночь 2 → утро дня 2: записка публикуется
+        await services.phases.end_night(game_id)
+        async with services.session_factory() as s:
+            note = await DeathNoteRepository(s).get(game_id, victim_uid)
+            assert note.published is True
+        assert any("Запомните: это мафия!" in text for _, text, _ in notifier.sent)
+
+    async def test_empty_note_neutral_message(self, services, session, notifier):
+        from bot.database.repositories.social import DeathNoteRepository
+
+        users = [await make_user(session, f"P{i}") for i in range(1, 7)]
+        game_id = await _start_game(
+            services, session, users, roles_setup={"mafia": 1, "detective": 1, "doctor": 1}
+        )
+        roles = await _roles_map(services, game_id)
+        mafia_uid = next(uid for uid, r in roles.items() if r == "mafia")
+        victim_uid = next(uid for uid, r in roles.items() if r == "citizen")
+
+        await services.phases.begin_game(game_id)
+        await services.games.submit_night_action(game_id, mafia_uid, "kill", victim_uid)
+        await services.phases.end_night(game_id)
+        # жертва ничего не написала → пустая записка (нейтральное сообщение)
+        async with services.session_factory() as s:
+            await DeathNoteRepository(s).set_text(game_id, victim_uid, "")
+            await s.commit()
+        # игра завершается → unpublished-loop публикует нейтральную записку
+        await services.phases.force_end(game_id, "тест")
+        assert any("ничего не успел сказать" in text for _, text, _ in notifier.sent)
+
+
+class TestWinStreak:
+    """Серия побед: +1 при победе, 0 при поражении, лучшая серия растёт."""
+
+    async def test_streak_on_win_and_loss(self, services, session):
+        users = [await make_user(session, f"P{i}") for i in range(1, 7)]
+        game_id = await _start_game(
+            services, session, users, roles_setup={"mafia": 1, "detective": 1, "doctor": 1}
+        )
+        roles = await _roles_map(services, game_id)
+        mafia_uid = next(uid for uid, r in roles.items() if r == "mafia")
+        citizen_uid = next(uid for uid, r in roles.items() if r == "citizen")
+
+        await services.phases.begin_game(game_id)
+        await services.games.submit_night_action(game_id, mafia_uid, "kill", citizen_uid)
+        await services.phases.end_night(game_id)
+        await services.phases.begin_voting(game_id)
+        alive_city = [uid for uid, r in roles.items() if r != "mafia" and uid != citizen_uid]
+        for uid in alive_city:
+            await services.games.cast_vote(game_id, uid, mafia_uid)
+        await services.phases.end_voting(game_id)  # победа города
+
+        async with services.session_factory() as s:
+            winner = await UserRepository(s).get_by_id(citizen_uid)
+            loser = await UserRepository(s).get_by_id(mafia_uid)
+            assert winner.win_streak == 1
+            assert winner.best_win_streak == 1
+            assert loser.win_streak == 0
+            assert loser.best_win_streak == 0
+
+
+class TestAchievementsAndTitles:
+    """Достижения и титулы за игровые ситуации (одноразовые, открывают титул)."""
+
+    async def test_city_win_grants_achievement_and_title(self, services, session):
+        from bot.database.repositories.social import UserAchievementRepository, UserTitleRepository
+
+        users = [await make_user(session, f"P{i}") for i in range(1, 7)]
+        game_id = await _start_game(
+            services, session, users, roles_setup={"mafia": 1, "detective": 1, "doctor": 1}
+        )
+        roles = await _roles_map(services, game_id)
+        mafia_uid = next(uid for uid, r in roles.items() if r == "mafia")
+        citizen_uid = next(uid for uid, r in roles.items() if r == "citizen")
+
+        await services.phases.begin_game(game_id)
+        await services.games.submit_night_action(game_id, mafia_uid, "kill", citizen_uid)
+        await services.phases.end_night(game_id)
+        await services.phases.begin_voting(game_id)
+        alive_city = [uid for uid, r in roles.items() if r != "mafia" and uid != citizen_uid]
+        for uid in alive_city:
+            await services.games.cast_vote(game_id, uid, mafia_uid)
+        await services.phases.end_voting(game_id)  # победа города
+
+        async with services.session_factory() as s:
+            ids = await UserAchievementRepository(s).ids_of(citizen_uid)
+            assert "city_win" in ids
+            assert "first_win" in ids  # первая победа
+            titles = await UserTitleRepository(s).ids_of(citizen_uid)
+            assert "veteran" in titles   # за city_win
+            assert "rookie" in titles    # за first_win
+
+    async def test_achievements_are_one_time(self, services, session):
+        from bot.services import rewards as rw
+
+        user = await make_user(session, "Once")
+        uid = user.id
+        earned = {uid: {"city_win", "first_win"}}
+        async with services.session_factory() as s:
+            first = await rw.award_achievements(s, earned)
+            await s.commit()
+            assert {a.id for a in first.get(uid, [])} == {"city_win", "first_win"}
+            # повторная выдача того же — ничего нового
+            second = await rw.award_achievements(s, earned)
+            await s.commit()
+            assert second.get(uid) is None or second.get(uid) == []
+
+
+class TestMetaAfterFullGame:
+    """После РЕАЛЬНОЙ партии: достижения, титулы, история, профиль, global/local."""
+
+    async def test_achievements_titles_history_profile_after_game(
+        self, services, session, notifier
+    ):
+        from bot.database.repositories.groups import GroupPlayerRepository
+        from bot.database.repositories.social import UserAchievementRepository
+        from bot.handlers.profile import _full_profile_text, compute_profile_extras
+        from bot.services.progression import DEFAULT_PROGRESSION as prog
+
+        users = [await make_user(session, f"M{i}") for i in range(1, 7)]
+        # играем В ГРУППЕ: локальная статистика обязана обновиться тоже
+        group = await services.groups.get_or_create(-610000, "Мафия Клуб")
+        for u in users:
+            await GroupPlayerRepository(session).ensure(group.id, u.id)
+        await session.commit()
+
+        room = await make_room(session, users[0], users,
+                               roles_setup={"mafia": 1, "detective": 1, "doctor": 1})
+        room.group_id = group.id
+        await session.commit()
+        for u in users:
+            await make_ready(session, room, u)
+        result = await services.games.start_game_from_room(room.id, users[0].id)
+        assert result.ok, result.message
+        async with services.session_factory() as s:
+            from bot.database.repositories.rooms import RoomRepository
+
+            game_id = await RoomRepository(s).get(room.id)
+            game_id = game_id.game_id
+
+        roles = await _roles_map(services, game_id)
+        mafia_uid = next(uid for uid, r in roles.items() if r == "mafia")
+        detective_uid = next(uid for uid, r in roles.items() if r == "detective")
+        citizen_uid = next(uid for uid, r in roles.items() if r == "citizen")
+
+        # Ночь 1: мафия убивает детектива; день: город вешает мафию -> победа города
+        await services.phases.begin_game(game_id)
+        kill = await services.games.submit_night_action(game_id, mafia_uid, "kill", detective_uid)
+        assert kill.ok
+        await services.phases.end_night(game_id)
+        await services.phases.begin_voting(game_id)
+        for uid in roles:
+            if uid != mafia_uid and uid != detective_uid:
+                assert (await services.games.cast_vote(game_id, uid, mafia_uid)).ok
+        await services.phases.end_voting(game_id)
+
+        async with services.session_factory() as s2:
+            game = await GameRepository(s2).get(game_id)
+            assert game.status == GameStatus.ENDED.value
+            assert game.winner == "city"
+
+        # --- достижения: автоматическая выдача работает и после правок профиля
+        async with services.session_factory() as s2:
+            ach_repo = UserAchievementRepository(s2)
+            winner_ach = await ach_repo.ids_of(citizen_uid)
+            # первая победа + победа городом + верный голос против мафии
+            assert {"first_win", "city_win", "sharp_eye"} <= winner_ach
+            mafia_ach = await ach_repo.ids_of(mafia_uid)
+            assert "first_win" not in mafia_ach  # мафия проиграла
+
+        # --- титулы, открытые достижениями
+        from bot.database.repositories.social import UserTitleRepository
+
+        async with services.session_factory() as s2:
+            titles = await UserTitleRepository(s2).ids_of(citizen_uid)
+            assert "rookie" in titles and "veteran" in titles
+
+        # --- уведомление о достижении игроку
+        assert any("достижение" in text.lower() for _, text, _ in notifier.sent)
+
+        # --- история партий
+        async with services.session_factory() as s2:
+            history = await GamePlayerRepository(s2).history_for_user(citizen_uid, 10)
+            assert len(history) == 1 and history[0].game_id == game_id
+
+        # --- профиль: достижения, места, XP->уровень, глобальный+локальный блоки
+        async with services.session_factory() as s2:
+            from bot.database.repositories.users import UserRepository
+
+            winner = await UserRepository(s2).get_by_id(citizen_uid)
+            data = await compute_profile_extras(s2, winner, services)
+            assert data["extras"]["achievements"] == "3/12"
+            assert data["ranks"]["rating"] == 1  # лучший рейтинг после игры
+            assert winner.level == prog.level_for_xp(winner.xp)  # уровень соответствует XP
+            profile = await _full_profile_text(s2, services, winner, group)
+            assert "🏅 Достижения: 3/12" in profile
+            assert "⭐ Общий: <b>112</b> <code>(#1)</code>" in profile  # глобальный рейтинг
+            assert "В ЭТОЙ ГРУППЕ" in profile               # локальный блок
+            assert "В ИГРЕ" in profile                      # игровая статистика внизу
+
+        # --- локальная статистика группы обновилась и не смешалась с глобальной
+        async with services.session_factory() as s2:
+            gp_repo = GroupPlayerRepository(s2)
+            gp = await gp_repo.get_membership(group.id, citizen_uid)
+            assert gp.wins == 1 and gp.rating == 112 and gp.xp == 42
+            assert gp.level == prog.level_for_xp(gp.xp)
+            gp_mafia = await gp_repo.get_membership(group.id, mafia_uid)
+            assert gp_mafia.losses == 1
+            # место в группе пересчитано: победитель выше проигравшего
+            assert await gp_repo.rank_in_group(group.id, "rating", gp.rating) == 1
+
+
+class TestLevelUpNotification:
+    """🎉 НОВЫЙ УРОВЕНЬ в финальном сообщении (одним сообщением, без спама)."""
+
+    async def test_level_up_announced_in_final_message(self, services, session, notifier):
+        users = [await make_user(session, f"L{i}") for i in range(1, 7)]
+        # все в 10 XP от 2-го уровня: любая партия поднимет уровень
+        for u in users:
+            u.xp, u.level = 140, 1
+        await session.commit()
+
+        game_id = await _start_game(
+            services, session, users, roles_setup={"mafia": 1, "detective": 1, "doctor": 1}
+        )
+        roles = await _roles_map(services, game_id)
+        mafia_uid = next(uid for uid, r in roles.items() if r == "mafia")
+        detective_uid = next(uid for uid, r in roles.items() if r == "detective")
+
+        await services.phases.begin_game(game_id)
+        await services.games.submit_night_action(game_id, mafia_uid, "kill", detective_uid)
+        await services.phases.end_night(game_id)
+        await services.phases.begin_voting(game_id)
+        for uid in roles:
+            if uid not in (mafia_uid, detective_uid):
+                assert (await services.games.cast_vote(game_id, uid, mafia_uid)).ok
+        await services.phases.end_voting(game_id)
+
+        # финальные сообщения содержат блок level-up с прогрессом нового уровня
+        level_ups = [text for _, text, _ in notifier.sent if "НОВЫЙ УРОВЕНЬ" in text]
+        assert level_ups, "нет ни одного уведомления о новом уровне"
+        for text in level_ups:
+            assert "📈 Уровень: <b>2</b>" in text
+            assert "Опыт:" in text and "XP" in text
+            assert "░" in text or "█" in text  # прогресс-бар
+        # ни одного промежуточного спама: одно сообщение с финальным уровнем
+        assert not any("НОВЫЙ УРОВЕНЬ: 1 → 1" in t for _, t, _ in notifier.sent)
+
+        async with services.session_factory() as s2:
+            from bot.services.progression import DEFAULT_PROGRESSION as prog
+
+            for u in users:
+                fresh = await UserRepository(s2).get_by_id(u.id)
+                assert fresh.level == prog.level_for_xp(fresh.xp)  # согласовано
+                assert fresh.level == 2  # 140 + минимум 10 = 150+

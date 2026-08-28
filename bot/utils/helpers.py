@@ -66,30 +66,25 @@ def verify_password(password: str, stored: str | None) -> bool:
     return secrets.compare_digest(hash_password(password, salt), stored)
 
 
-# --- Уровни и опыт -----------------------------------------------------------
+def xp_progress_bar(in_level: int, need: int, width: int = 15) -> str:
+    """Визуальный прогресс уровня: '██░░░░░░░░░░░░░ 13%'.
 
-def level_from_xp(xp: int) -> int:
-    """Уровень растёт квадратично: на каждый следующий нужно больше XP.
-
-    Переход 1->2: 100 XP, 2->3: 150 XP, 3->4: 200 XP и т.д.
+    Единый стиль на весь бот (профиль, Owner-панель, level-up).
+    Прогресс ограничен 0–100%, деления на ноль нет.
     """
-    level = 1
-    need = 100
-    remaining = max(0, xp)
-    while remaining >= need:
-        remaining -= need
-        level += 1
-        need += 50
-    return level
+    ratio = 0.0 if need <= 0 else min(1.0, max(0.0, in_level / need))
+    filled = round(ratio * width)
+    bar = "█" * filled + "░" * (width - filled)
+    return f"{bar} {int(round(ratio * 100))}%"
 
 
-def xp_for_next_level(xp: int) -> int:
-    """Сколько XP осталось до следующего уровня (для профиля)."""
-    level = 1
-    need = 100
-    remaining = max(0, xp)
-    while remaining >= need:
-        remaining -= need
-        level += 1
-        need += 50
-    return need - remaining
+def xp_progress_lines(xp: int, progression=None) -> list[str]:
+    """'✨ Опыт: 20 / 150 XP' + бар — по общему XP (единый формат бота)."""
+    from bot.services.progression import DEFAULT_PROGRESSION
+
+    progression = progression or DEFAULT_PROGRESSION
+    _level, in_level, need = progression.xp_progress_in_level(max(0, xp))
+    return [
+        f"✨ Опыт: <b>{in_level} / {need}</b> XP",
+        xp_progress_bar(in_level, need),
+    ]

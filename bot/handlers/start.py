@@ -10,9 +10,8 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from bot.database.repositories.games import GamePlayerRepository
 from bot.database.repositories.rooms import RoomRepository
-from bot.database.repositories.users import UserRepository
 from bot.keyboards.common import back_to_menu_kb, main_menu_kb
-from bot.keyboards.room import rooms_list_kb
+from bot.keyboards.room import play_empty_kb, rooms_list_kb
 from bot.utils.callbacks import GameCB, MenuCB
 from bot.utils.helpers import display_name, esc
 from bot.utils.telegram import edit_or_answer
@@ -92,17 +91,9 @@ async def cb_rules(callback: CallbackQuery) -> None:
     await edit_or_answer(callback, RULES, back_to_menu_kb())
 
 
-@router.callback_query(MenuCB.filter(F.action == "rating"))
-async def cb_rating(callback: CallbackQuery, session) -> None:
-    repo = UserRepository(session)
-    top = await repo.top_by_rating(10)
-    lines = ["🏆 <b>РЕЙТИНГ ИГРОКОВ</b>", ""]
-    if not top:
-        lines.append("Пока пусто — стань первым!")
-    for index, user in enumerate(top, start=1):
-        medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(index, f"{index}.")
-        lines.append(f"{medal} {esc(display_name(user))} — {user.rating} (Lvl {user.level})")
-    await edit_or_answer(callback, "\n".join(lines), back_to_menu_kb())
+# Кнопка 📊 Рейтинг обрабатывается в ratings.py (cb_menu_rating): роутер ratings
+# подключается РАНЬДЕ start, поэтому обработчик здесь был недостижимым дубликатом
+# и удалён во избежание конфликтов callback_data.
 
 
 def _active_game_kb(game_id: int) -> InlineKeyboardMarkup:
@@ -116,7 +107,7 @@ def _active_game_kb(game_id: int) -> InlineKeyboardMarkup:
 
 @router.callback_query(MenuCB.filter(F.action == "play"))
 @router.callback_query(MenuCB.filter(F.action == "find"))
-async def cb_play(callback: CallbackQuery, session, db_user) -> None:
+async def cb_play(callback: CallbackQuery, session, db_user, group=None) -> None:
     await callback.answer()
     players = GamePlayerRepository(session)
 
@@ -130,22 +121,46 @@ async def cb_play(callback: CallbackQuery, session, db_user) -> None:
         return
 
     rooms = RoomRepository(session)
-    open_rooms = await rooms.open_public_rooms(10)
+    # Изоляция групп (ТЗ): в группе — только комнаты ЭТОЙ группы,
+    # в ЛС — только глобальные комнаты (без группы).
+    if group is not None:
+        open_rooms = await rooms.for_group(group.id)
+    else:
+        open_rooms = await rooms.open_public_rooms(10)
     my_room = await rooms.open_room_of_user(db_user.id)
     if not open_rooms and my_room is None:
-        await edit_or_answer(
-            callback,
-            "🔎 Открытых публичных комнат нет.\n\nСоздай свою — «🏠 Создать комнату»!",
-            back_to_menu_kb(),
-        )
+        # пустой экран — не тупик: подсказка о создании и вход по ID
+        if group is not None:
+            await edit_or_answer(
+                callback,
+                f"🔎 Открытых комнат в группе «{esc(group.title or '')}» нет.\n\n"
+                "🏠 Создать комнату с правилами группы: <code>/createroom</code>\n"
+                "➕ Или войди в существующую по её ID.",
+                play_empty_kb(in_group=True),
+            )
+        else:
+            await edit_or_answer(
+                callback,
+                "🔎 Открытых публичных комнат нет.\n\n"
+                "Создай свою — «🏠 Создать комнату»!\n"
+                "➕ Или войди в существующую по её ID.",
+                play_empty_kb(in_group=False),
+            )
         return
 
-    lines = ["🔎 <b>ОТКРЫТЫЕ КОМНАТЫ</b>", ""]
+    if group is not None:
+        title = f"🔎 <b>КОМНАТЫ ГРУППЫ</b> · <i>{esc(group.title or '')}</i>"
+    else:
+        title = "🔎 <b>ОТКРЫТЫЕ КОМНАТЫ</b>"
+    lines = [title, ""]
     for room in open_rooms:
         lock = "🔐" if room.is_private else "🌍"
         lines.append(
             f"• #{room.id} «{esc(room.name)}» {lock} — 👥 {room.player_count()}/{room.max_players}"
         )
+    if not open_rooms:
+        # своя комната есть, но в этом скоупе других комнат нет
+        lines.append("Открытых комнат нет." if group is None else "Открытых комнат в группе нет.")
     lines.append("")
     lines.append("Нажми на комнату ниже, чтобы открыть её 👇")
     await edit_or_answer(callback, "\n".join(lines), rooms_list_kb(open_rooms, my_room))

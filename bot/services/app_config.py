@@ -14,6 +14,9 @@ class GlobalSettings(BaseModel):
     night_seconds: int = 90
     day_seconds: int = 180
     vote_seconds: int = 60
+    # Форумные чаты партий (None = не задано в БД -> берётся из .env)
+    game_forum_chat_id: int | None = None
+    mafia_forum_chat_id: int | None = None
 
     def is_role_enabled(self, role_id: str) -> bool:
         return not self.enabled_roles or role_id in self.enabled_roles
@@ -34,6 +37,8 @@ class AppConfigService:
             night_seconds=self.env_settings.default_night_seconds,
             day_seconds=self.env_settings.default_day_seconds,
             vote_seconds=self.env_settings.default_vote_seconds,
+            game_forum_chat_id=getattr(self.env_settings, "game_forum_chat_id", None),
+            mafia_forum_chat_id=getattr(self.env_settings, "mafia_forum_chat_id", None),
         )
         async with self.session_factory() as session:
             repo = AppSettingRepository(session)

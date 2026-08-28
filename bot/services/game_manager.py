@@ -40,11 +40,13 @@ class GameManager:
         notifier: Notifier,
         phases: PhaseManager,
         locks: GameLocks,
+        game_chats=None,
     ) -> None:
         self.session_factory = session_factory
         self.notifier = notifier
         self.phases = phases
         self.locks = locks
+        self.game_chats = game_chats
 
     # ------------------------------------------------------------ старт игры
 
@@ -122,6 +124,15 @@ class GameManager:
             logger.info(
                 "Игра %s создана из комнаты %s: %s игроков", game.id, room.id, len(players)
             )
+            # Форумные темы партии: создаются автоматически в двух постоянных
+            # форумах (GAME_FORUM_CHAT_ID / MAFIA_FORUM_CHAT_ID). Ручных
+            # команд больше не нужно; если форумы не настроены — игра в ЛС.
+            if self.game_chats is not None:
+                try:
+                    await self.game_chats.on_game_started(session, game, players)
+                    await session.commit()
+                except Exception:
+                    logger.warning("GameChat: не удалось создать темы партии")
             return ActionResult(
                 True,
                 f"🎮 Игра #{game.id} запущена! Роли распределены, первая ночь через {countdown} сек.",
@@ -309,6 +320,13 @@ class GameManager:
                     await self.notifier.send(
                         gp.user.telegram_id, game_view.death_personal_text(gp, "left")
                     )
+                if self.game_chats is not None:
+                    try:
+                        await self.game_chats.on_death(session, game, gp)
+                    except Exception:
+                        logger.warning("GameChat: сбой обработки выхода игрока")
+                # предложить предсмертную записку (опубликуется следующим утром или в конце игры)
+                await self.phases._record_death_note(session, game, gp)
                 logger.info("Игра %s: игрок %s покинул игру", game.id, user_id)
                 return ActionResult(True, "Ты покинул игру. Спасибо за партию!")
 

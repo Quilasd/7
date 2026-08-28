@@ -43,10 +43,19 @@ class TimerManager:
             logger.exception("Сбой таймера %s-%s", game_id, phase)
 
     def cancel(self, game_id: int, phase: str | None = None) -> None:
+        """Отмена таймеров игры.
+
+        ВАЖНО: не отменяем ТЕКУЩУЮ задачу. Переходы фаз выполняются внутри
+        таймерных задач, и `_end_game`/`_schedule` вызывают cancel() из них же;
+        self-cancel убил бы выполнение на первом же await (CancelledError),
+        и финальная обработка игры (статистика/XP/сообщения) молча умерла бы.
+        Текущая задача исключается из реестра и завершится сама.
+        """
+        current = asyncio.current_task()
         keys = [k for k in self._tasks if k[0] == game_id and (phase is None or k[1] == phase)]
         for key in keys:
             task = self._tasks.pop(key, None)
-            if task and not task.done():
+            if task and not task.done() and task is not current:
                 task.cancel()
 
     def cancel_all(self) -> None:

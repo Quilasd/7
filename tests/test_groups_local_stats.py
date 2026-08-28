@@ -107,7 +107,7 @@ class TestLocalStatsIsolation:
         ga = await services.groups.local_player(a.id, user.id)
         gb = await services.groups.local_player(b.id, user.id)
         assert ga.games_played == 3 and ga.wins == 3 and ga.rating == 330
-        assert ga.xp == 120 and ga.level == 2  # 3 * 40 = 120 -> уровень 2
+        assert ga.xp == 120 and ga.level == 1  # 3*40=120; до 2-го уровня теперь 150
         assert gb.games_played == 1 and gb.losses == 1 and gb.rating == 25
         assert gb.xp == 10 and gb.level == 1
 
@@ -155,9 +155,9 @@ class TestGroupModerationData:
         a = await services.groups.get_or_create(-101100, "A")
         b = await services.groups.get_or_create(-101200, "B")
 
-        assert await services.groups.warn(a.id, target.id, actor.id) == 1
-        assert await services.groups.warn(a.id, target.id, actor.id) == 2
-        assert await services.groups.warn(a.id, target.id, actor.id, delta=-1) == 1
+        assert (await services.groups.warn(a.id, target.id, actor.id))["count"] == 1
+        assert (await services.groups.warn(a.id, target.id, actor.id))["count"] == 2
+        assert await services.groups.unwarn(a.id, target.id, actor.id) == 1
 
         banned, _ = await services.groups.set_local_ban(a.id, target.id, True, actor.id)
         assert banned is True
@@ -166,3 +166,108 @@ class TestGroupModerationData:
         assert gb is None  # в B даже участником не был
         ga = await services.groups.local_player(a.id, target.id)
         assert ga.is_banned is True and ga.warnings == 1
+
+
+class TestModerationV2Service:
+    """Варны со сроком, ленивое истечение временного бана, enforcement в комнатах."""
+
+    async def test_warn_expires(self, services, session):
+        from datetime import timedelta
+
+        from bot.utils.helpers import utcnow
+
+        target = await make_user(session, "T")
+        actor = await make_user(session, "M")
+        group = await services.groups.get_or_create(-101300, "A")
+
+        result = await services.groups.warn(
+            group.id, target.id, actor.id, reason="флуд", duration_minutes=120
+        )
+        assert result["count"] == 1
+        # варн истёк -> неактивен и не считается
+        async with services.session_factory() as s:
+            from bot.database.models import GroupWarning
+
+            w = await s.get(GroupWarning, result["warn"].id)
+            w.expires_at = utcnow() - timedelta(hours=1)
+            await s.commit()
+        assert await services.groups.warnings_of(group.id, target.id) == []
+
+    async def test_warn_limit_resets_after_auto_ban(self, services, session):
+        target = await make_user(session, "T")
+        actor = await make_user(session, "M")
+        group = await services.groups.get_or_create(-101400, "A")
+
+        for i in range(3):
+            result = await services.groups.warn(group.id, target.id, actor.id, reason=f"r{i}")
+        assert result["auto_ban_until"] is not None
+        gp = await services.groups.local_player(group.id, target.id)
+        assert gp.is_banned and gp.banned_until is not None
+        assert gp.warnings == 0  # израсходованы
+        assert await services.groups.warnings_of(group.id, target.id) == []
+
+    async def test_effective_ban_lazy_unban(self, services, session):
+        from datetime import timedelta
+
+        from bot.utils.helpers import utcnow
+
+        target = await make_user(session, "T")
+        actor = await make_user(session, "M")
+        group = await services.groups.get_or_create(-101500, "A")
+
+        until = utcnow() + timedelta(hours=2)
+        await services.groups.set_local_ban(group.id, target.id, True, actor.id, until=until)
+        async with services.session_factory() as s:
+            banned, gp = await services.groups.effective_ban(s, group.id, target.id)
+            assert banned is True
+        # срок вышел -> ленивый авто-разбан
+        async with services.session_factory() as s:
+            from bot.database.repositories.groups import GroupPlayerRepository
+
+            row = await GroupPlayerRepository(s).get_membership(group.id, target.id)
+            row.banned_until = utcnow() - timedelta(minutes=1)
+            await s.commit()
+        async with services.session_factory() as s:
+            banned, gp = await services.groups.effective_ban(s, group.id, target.id)
+            assert banned is False
+
+    async def test_banned_player_cannot_join_group_room(self, services, session):
+        creator = await make_user(session, "C")
+        banned = await make_user(session, "B")
+        actor = await make_user(session, "M")
+        group = await services.groups.get_or_create(-101600, "A")
+
+        room, msg = await services.groups.create_room_in_group(group.id, creator.id)
+        assert room is not None, msg
+
+        await services.groups.set_local_ban(
+            group.id, banned.id, True, actor.id
+        )
+        joined, why = await services.rooms.join(room.id, banned.id)
+        assert joined is None and "забанен" in why
+
+    async def test_expired_ban_allows_join(self, services, session):
+        from datetime import timedelta
+
+        from bot.utils.helpers import utcnow
+
+        creator = await make_user(session, "C")
+        was_banned = await make_user(session, "W")
+        actor = await make_user(session, "M")
+        group = await services.groups.get_or_create(-101700, "A")
+
+        room, _ = await services.groups.create_room_in_group(group.id, creator.id)
+        await services.groups.set_local_ban(
+            group.id, was_banned.id, True, actor.id, until=utcnow() - timedelta(hours=1)
+        )
+        joined, why = await services.rooms.join(room.id, was_banned.id)
+        assert joined is not None, why  # истёкший бан не мешает
+
+    async def test_banned_cannot_create_room_in_group(self, services, session):
+        creator = await make_user(session, "C")
+        actor = await make_user(session, "M")
+        group = await services.groups.get_or_create(-101800, "A")
+
+        await services.groups.set_local_ban(group.id, creator.id, True, actor.id)
+        room, msg = await services.groups.create_room_in_group(group.id, creator.id)
+        assert room is None and "забанен" in msg

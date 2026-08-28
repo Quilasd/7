@@ -23,6 +23,7 @@ from bot.database.models import Game, GamePlayer, GameStatus, PlayerStatus, Room
 from bot.database.repositories.actions import GameActionRepository
 from bot.database.repositories.games import GamePlayerRepository, GameRepository
 from bot.database.repositories.rooms import RoomRepository
+from bot.database.repositories.social import DeathNoteRepository
 from bot.database.repositories.users import UserRepository
 from bot.roles import ActionType, Team, get_role, team_of
 from bot.services import game_view
@@ -60,6 +61,7 @@ class PhaseManager:
         locks: GameLocks | None = None,
         rating: RatingService | None = None,
         app_settings=None,
+        game_chats=None,
     ) -> None:
         self.session_factory = session_factory
         self.notifier = notifier
@@ -68,6 +70,21 @@ class PhaseManager:
         self.rating = rating or RatingService()
         # app_settings: объект с флагами DEBUG_AFFECTS_* (bot.config.Settings)
         self.app_settings = app_settings
+        # GameChatService | None — игровые чаты партии (необязательный слой)
+        self.game_chats = game_chats
+
+    async def _chats_call(self, method_name: str, *args) -> None:
+        """Хук игровых чатов: сбой чатов НЕ ломает игровой поток."""
+        service = getattr(self, "game_chats", None)
+        if service is None:
+            return
+        try:
+            await getattr(service, method_name)(*args)
+        except Exception:
+            logger.warning(
+                "GameChat: сбой синхронизации чатов (игра продолжается)",
+                exc_info=True,
+            )
 
     # ------------------------------------------------------------------ utils
 
@@ -87,6 +104,35 @@ class PhaseManager:
     def _append_event(game: Game, event: dict) -> None:
         # JSON-колонки не отслеживают in-place мутации — переприсваиваем
         game.events = list(game.events or []) + [event]
+
+    # ------------------------------------------------------- предсмертные записки
+
+    async def _record_death_note(self, session, game: Game, victim: GamePlayer) -> None:
+        """Создаёт placeholder записки умершего и предлагает её написать."""
+        from bot.keyboards.game import death_note_keyboard
+
+        await DeathNoteRepository(session).ensure(game.id, victim.user_id, game.day_number)
+        await self._send(
+            victim.user.telegram_id,
+            "📝 Ты можешь оставить <b>предсмертную записку</b> (до 300 символов) — "
+            "её прочитают утром. Один раз, изменить нельзя.\n\n"
+            "Напиши: <code>/note &lt;текст&gt;</code> или нажми кнопку.",
+            death_note_keyboard(game.id),
+        )
+
+    async def _publish_morning_notes(self, session, game: Game, players: list[GamePlayer]) -> None:
+        """Публикует записки умерших ранее (death_day < текущего дня) утром."""
+        repo = DeathNoteRepository(session)
+        pending = await repo.pending_before(game.id, game.day_number)
+        if not pending:
+            return
+        by_id = {p.user_id: p for p in players}
+        for note in pending:
+            victim = by_id.get(note.user_id)
+            await self._broadcast(players, game_view.death_note_text(victim, note.text))
+            note.published = True
+            note.published_at = utcnow()
+        await session.flush()
 
     # ------------------------------------------------------- публичные фазы
 
@@ -140,6 +186,11 @@ class PhaseManager:
                     })
                 await session.commit()
 
+                for death in outcome.deaths:
+                    victim = by_user_id.get(death.user_id)
+                    if victim:
+                        await self._chats_call("on_death", session, game, victim)
+
                 win = evaluate_win(players)
                 if win is not None:
                     await self._end_game(session, game, players, win)
@@ -151,6 +202,8 @@ class PhaseManager:
                     game, outcome, players, settings.get("reveal_roles_on_death", True)
                 )
                 await self._broadcast(players, morning)
+                # публикуем записки умерших ранее (умерли до этого дня)
+                await self._publish_morning_notes(session, game, players)
                 for death in outcome.deaths:
                     victim = by_user_id.get(death.user_id)
                     if victim:
@@ -158,6 +211,8 @@ class PhaseManager:
                             victim.user.telegram_id,
                             game_view.death_personal_text(victim, death.cause),
                         )
+                        # предложить предсмертную записку (опубликуется следующим утром)
+                        await self._record_death_note(session, game, victim)
                 for check in outcome.checks:
                     detective = by_user_id.get(check.detective_id)
                     target = by_user_id.get(check.target_id)
@@ -222,6 +277,7 @@ class PhaseManager:
                     keyboard,
                 )
         self._schedule(game.id, "night", seconds, partial(self.end_night, game.id))
+        await self._chats_call("on_night_started", session, game, players)
         logger.info("Игра %s: ночь #%s начата", game.id, game.day_number)
 
     async def _valid_night_targets(
@@ -262,6 +318,7 @@ class PhaseManager:
         for gp in alive:
             await self._send(gp.user.telegram_id, text)
         self._schedule(game.id, "day", seconds, partial(self.begin_voting, game.id))
+        await self._chats_call("on_day_started", session, game, players)
         logger.info("Игра %s: день #%s начат", game.id, game.day_number)
 
     async def _begin_voting(
@@ -338,7 +395,11 @@ class PhaseManager:
                     victim.user.telegram_id,
                     game_view.death_personal_text(victim, "vote"),
                 )
+                # предложить предсмертную записку — опубликуется следующим утром,
+                # текущую фазу/переход к ночи не ломаем
+                await self._record_death_note(session, game, victim)
                 await session.commit()
+                await self._chats_call("on_death", session, game, victim)
 
         win = evaluate_win(players)
         if win is not None:
@@ -360,6 +421,15 @@ class PhaseManager:
         win: WinResult | None,
         reason: str | None = None,
     ) -> None:
+        if game.status == GameStatus.ENDED.value:
+            # защита от двойного финала: повторный вызов не должен повторно
+            # начислять статистику/XP/достижения (идемпотентность)
+            logger.warning(
+                "Игра %s: _end_game вызван повторно (уже ENDED) — финализация пропущена",
+                game.id,
+            )
+            return
+        logger.info("GAME FINISH START: игра %s", game.id)
         game.status = GameStatus.ENDED.value
         game.ended_at = utcnow()
         game.phase_deadline = None
@@ -435,6 +505,7 @@ class PhaseManager:
 
         applied_global = AppliedStats()
         applied_local = AppliedStats()
+        wins_before: dict[int, int] = {}
         if apply_global:
             users_repo = UserRepository(session)
             users_by_id: dict[int, object] = {}
@@ -442,6 +513,7 @@ class PhaseManager:
                 user = await users_repo.get_by_id(gp.user_id)
                 if user:
                     users_by_id[gp.user_id] = user
+            wins_before = {uid: int(u.wins) for uid, u in users_by_id.items() if u is not None}
             applied_global = self.rating.apply_global(
                 users_by_id, winner_ids, is_draw, events, survived_ids, global_flags
             )
@@ -457,6 +529,61 @@ class PhaseManager:
             )
         if test_mode and not (apply_global or apply_local):
             logger.info("Игра %s: тестовый режим — статистика не обновляется", game.id)
+        await session.commit()
+        if apply_global or apply_local:
+            logger.info(
+                "STATS UPDATED: игра %s (global=%s, local=%s, победителей=%s)",
+                game.id, apply_global, apply_local, len(winner_ids),
+            )
+
+        # --- Достижения, титулы и финал предсмертных записок -----------------
+        by_id = {p.user_id: p for p in players}
+        newly_awarded: dict[int, list] = {}
+        if not is_draw:
+            from bot.services import achievements as ach
+            from bot.services import rewards as rw
+
+            roles_map = {
+                gp.user_id: gp.role for gp in players
+                if gp.status != PlayerStatus.SPECTATOR.value
+            }
+            correct_checks: dict[int, int] = {}
+            for action in check_actions:
+                target_gp = by_id.get(action.target_id)
+                if target_gp and team_of(target_gp.role) == Team.MAFIA:
+                    correct_checks[action.actor_id] = correct_checks.get(action.actor_id, 0) + 1
+            sacrificed_ids = {
+                e.get("user_id") for e in (game.events or [])
+                if e.get("type") == "death" and e.get("cause") == "sacrifice"
+            }
+            maniac_killers: set[int] = set()
+            for e in (game.events or []):
+                if e.get("type") == "death" and e.get("cause") == "maniac":
+                    maniac_killers.update(e.get("killers", []))
+            win_streak_after = {}
+            if apply_global:
+                win_streak_after = {
+                    uid: int(getattr(u, "win_streak", 0) or 0) for uid, u in users_by_id.items()
+                }
+            ctx = ach.GameAchievementContext(
+                roles=roles_map, winners=winner_ids, is_draw=is_draw,
+                survived_ids=survived_ids, kills=events.kills, saves=events.saves,
+                correct_checks=correct_checks, correct_votes=events.correct_votes,
+                sacrificed_ids=sacrificed_ids, maniac_killers=maniac_killers,
+                wins_before=wins_before, win_streak_after=win_streak_after,
+            )
+            newly_awarded = await rw.award_achievements(session, ach.evaluate(ctx))
+            logger.info(
+                "ACHIEVEMENTS EVALUATED: игра %s, новых наград: %s",
+                game.id, sum(len(v) for v in newly_awarded.values()),
+            )
+
+        # опубликовать оставшиеся неопубликованные записки (чтобы не потерять)
+        for note in await DeathNoteRepository(session).unpublished(game.id):
+            victim = by_id.get(note.user_id)
+            await self._broadcast(players, game_view.death_note_text(victim, note.text))
+            note.published = True
+            note.published_at = utcnow()
         await session.commit()
 
         # --- Финальные сообщения (одно на игрока, без лишнего спама) --------
@@ -483,9 +610,43 @@ class PhaseManager:
                 won = gp.user_id in winner_ids
                 head = "🎉 Ты в числе победителей!" if won else "😔 Поражение."
                 personal = head + "\n" + "\n".join(parts)
+                # 🎉 повышение уровня (одно сообщение, даже если уровней несколько)
+                from bot.utils.helpers import xp_progress_lines
+
+                lu_global = (applied_global.level_ups.get(gp.user_id)
+                             if apply_global else None)
+                lu_local = (applied_local.level_ups.get(gp.user_id)
+                            if apply_local else None)
+                if lu_global or lu_local:
+                    old_level, new_level = lu_global or lu_local
+                    progress = xp_progress_lines(
+                        users_by_id[gp.user_id].xp if apply_global
+                        else gp.user.xp
+                    )
+                    personal += (
+                        f"\n\n🎉 <b>НОВЫЙ УРОВЕНЬ: {old_level} → {new_level}!</b>\n"
+                        f"📈 Уровень: <b>{new_level}</b>\n" + "\n".join(progress)
+                    )
+                    if lu_local and (not lu_global or lu_local[1] != lu_global[1]):
+                        personal += f"\n🏠 В группе: уровень {lu_local[1]}"
+            awards = newly_awarded.get(gp.user_id)
+            if awards:
+                from bot.services import titles as _t
+                lines = [f"🏅 Новое достижение: {a.name}." for a in awards]
+                unlocked_titles = []
+                for a in awards:
+                    tkey = _t.TITLE_UNLOCKS.get(a.id)
+                    if tkey:
+                        title = _t.get_title(tkey)
+                        if title:
+                            unlocked_titles.append(title.name)
+                if unlocked_titles:
+                    lines.append(f"🎓 Открыт титул: {', '.join(dict.fromkeys(unlocked_titles))}.")
+                personal = personal + "\n" + "\n".join(lines)
             await self._send(gp.user.telegram_id, f"{overview}\n\n———\n{personal}")
+        await self._chats_call("on_game_ended", session, game, players, title)
         logger.info(
-            "Игра %s завершена: победитель=%s%s (global=%s, local=%s)",
+            "GAME FINISH COMPLETE: игра %s, победитель=%s%s (global=%s, local=%s)",
             game.id, game.winner, " (тест)" if test_mode else "", apply_global, apply_local,
         )
 
@@ -523,6 +684,13 @@ class PhaseManager:
                 delay = 1  # дедлайн прошёл — отрабатываем почти сразу
             self.timers.schedule(game.id, f"recover-{game.status}", delay, partial(callback, game.id))
             recovered += 1
+        if self.game_chats is not None:
+            try:
+                chats_recovered = await self.game_chats.recover(session)
+                if chats_recovered:
+                    logger.info("Восстановлено прав игровых чатов: %s", chats_recovered)
+            except Exception:
+                logger.warning("GameChat: сбой восстановления чатов", exc_info=True)
         if recovered:
             logger.info("Восстановлено активных игр: %s", recovered)
         return recovered

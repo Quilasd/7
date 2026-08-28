@@ -365,3 +365,196 @@ async def process_param(message: Message, state: FSMContext, services) -> None:
     setattr(gs, param, int(raw))
     await services.app_config.save(gs)
     await message.answer(f"✅ {param} = {raw} сек.", reply_markup=admin_back_kb())
+
+
+# ============================== OWNER-ONLY: ручная выдача глобальной статистики
+# Выдача/изменение рейтингов, XP, уровней и достижений доступна ТОЛЬКО OWNER
+# (OWNER_IDS в .env). Проверка серверная — global_level == OWNER из
+# PermissionService; ADMIN_IDS (Senior Admin) и групповые админы доступа НЕ имеют:
+# ручная выдача могла бы испортить глобальный рейтинг проекта.
+
+
+def _is_owner(services, telegram_id: int) -> bool:
+    from bot.services.permissions import AdminLevel
+
+    return services.permissions.global_level(telegram_id) >= AdminLevel.OWNER
+
+
+async def _deny_owner(message: Message) -> None:
+    await message.answer("⛔️ Только владельцу бота (OWNER_IDS).")
+
+
+async def _owner_target(session, message: Message, command: CommandObject):
+    """Цель: первый аргумент (ID/@username) или ответ на сообщение."""
+    from bot.services.lookup import UserLookupService
+
+    args = (command.args or "").split()
+    query = args[0] if args else None
+    target = await UserLookupService(session).resolve(
+        query=query,
+        reply_telegram_id=(
+            message.reply_to_message.from_user.id
+            if message.reply_to_message and message.reply_to_message.from_user
+            else None
+        ),
+    )
+    return target, args
+
+
+async def _audit_owner(session, actor, target, action: str, details: str) -> None:
+    from bot.database.repositories.groups import AuditLogRepository
+
+    await AuditLogRepository(session).log(
+        actor_id=actor.id, target_id=target.id, group_id=None,
+        action=action, details=details[:512],
+    )
+
+
+@router.message(Command(
+    "set_rating", "add_rating", "set_wins", "add_wins", "set_xp", "add_xp", "set_level"
+))
+async def cmd_owner_stats(message: Message, command: CommandObject, session,
+                          db_user, services) -> None:
+    """OWNER-only: ручное изменение рейтинга/побед/XP/уровня любого игрока."""
+    if not _is_owner(services, message.from_user.id):
+        await _deny_owner(message)
+        return
+
+    from bot.services.progression import DEFAULT_PROGRESSION
+    from bot.utils.helpers import display_name
+
+    target, args = await _owner_target(session, message, command)
+    if target is None or len(args) < 2 or not args[1].lstrip("-").isdigit():
+        await message.answer(
+            "Формат: <code>/set_rating|add_rating|set_wins|add_wins|"
+            "set_xp|add_xp|set_level &lt;ID|@username&gt; &lt;число&gt;</code>"
+        )
+        return
+    value = int(args[1])
+    name = command.command
+
+    if name in ("set_rating", "add_rating"):
+        target.rating = value if name == "set_rating" else max(0, target.rating + value)
+        new_value, field = target.rating, "рейтинг"
+        details = f"rating={target.rating}"
+    elif name in ("set_wins", "add_wins"):
+        target.wins = value if name == "set_wins" else max(0, target.wins + value)
+        new_value, field = target.wins, "победы"
+        details = f"wins={target.wins}"
+    elif name in ("set_xp", "add_xp"):
+        target.xp = value if name == "set_xp" else max(0, target.xp + value)
+        target.level = DEFAULT_PROGRESSION.level_for_xp(target.xp)
+        new_value, field = target.xp, "XP"
+        details = f"xp={target.xp} level={target.level}"
+    else:  # set_level
+        if not 1 <= value <= 99:
+            await message.answer("Уровень должен быть от 1 до 99.")
+            return
+        target.level = value
+        target.xp = DEFAULT_PROGRESSION.threshold(value)  # XP синхронизируется с уровнем
+        new_value, field = target.level, "уровень"
+        details = f"level={target.level} xp={target.xp}"
+
+    await _audit_owner(session, db_user, target, name, details)
+    await session.commit()
+
+    from bot.database.repositories.users import UserRepository
+
+    users = UserRepository(session)
+    rank = {
+        "rating": await users.rank_by_rating(target.rating),
+        "wins": await users.rank_by_wins(target.wins),
+        "level": await users.rank_by_level(target.level, target.xp),
+    }
+    await message.answer(
+        f"✅ {esc(display_name(target))}: {field} = <b>{new_value}</b>\n"
+        f"⭐ Общий: <b>{target.rating}</b> (#{rank['rating']}) · "
+        f"🏆 Побед: <b>{target.wins}</b> (#{rank['wins']}) · "
+        f"📈 Уровень: <b>{target.level}</b> (#{rank['level']}) · ✨ XP: <b>{target.xp}</b>"
+    )
+
+
+@router.message(Command("achievement_grant", "achievement_remove"))
+async def cmd_owner_achievements(message: Message, command: CommandObject,
+                                 session, db_user, services) -> None:
+    """OWNER-only: ручная выдача/снятие достижения (для проверки профиля)."""
+    if not _is_owner(services, message.from_user.id):
+        await _deny_owner(message)
+        return
+
+    from bot.database.repositories.social import UserAchievementRepository
+    from bot.services import achievements as ach
+    from bot.services import rewards as rw
+    from bot.utils.helpers import display_name
+
+    target, args = await _owner_target(session, message, command)
+    if target is None or len(args) < 2:
+        ids = ", ".join(a.id for a in ach.all_achievements())
+        await message.answer(
+            f"Формат: <code>/achievement_grant|achievement_remove &lt;ID|@username&gt; &lt;achievement_id&gt;</code>\n"
+            f"Доступно: <code>{ids}</code>"
+        )
+        return
+    aid = args[1].strip()
+    definition = ach.get_achievement(aid)
+    if definition is None:
+        await message.answer(f"Неизвестное достижение: <code>{esc(aid)}</code>.")
+        return
+
+    if command.command == "achievement_grant":
+        # тот же путь, что и автоматическая выдача (титулы открываются сами)
+        newly = await rw.award_achievements(session, {target.id: {aid}})
+        await _audit_owner(session, db_user, target, "achievement_grant", f"aid={aid}")
+        await session.commit()
+        if newly:
+            from bot.services import titles as ttl
+
+            title = ttl.get_title(ttl.TITLE_UNLOCKS.get(aid))
+            extra = f" Открыт титул: {title.name}." if title else ""
+            await message.answer(
+                f"🏅 {definition.emoji} «{definition.name}» выдан: "
+                f"{esc(display_name(target))}.{extra}"
+            )
+        else:
+            await message.answer("Это достижение у игрока уже есть.")
+    else:
+        removed = await UserAchievementRepository(session).remove(target.id, aid)
+        if removed:
+            # снимаем и титул, открытый этим достижением (если он из достижения)
+            from bot.services import titles as ttl
+
+            title_id = ttl.TITLE_UNLOCKS.get(aid)
+            if title_id:
+                from bot.database.repositories.social import UserTitleRepository
+
+                await UserTitleRepository(session).remove(
+                    target.id, title_id, source="achievement"
+                )
+                if target.active_title == title_id:
+                    target.active_title = None
+            await _audit_owner(session, db_user, target, "achievement_remove", f"aid={aid}")
+        await session.commit()
+        if removed:
+            await message.answer(
+                f"🏅 «{definition.name}» снят с {esc(display_name(target))}."
+            )
+        else:
+            await message.answer("Такого достижения у игрока нет.")
+
+
+@router.message(Command("level_info"))
+async def cmd_level_info(message: Message) -> None:
+    """Таблица уровней (сколько XP нужно на каждый уровень)."""
+    from bot.services.progression import DEFAULT_PROGRESSION as prog
+
+    lines = ["📈 <b>ТАБЛИЦА УРОВНЕЙ</b>", "",
+             "<i>Уровень · XP внутри уровня · суммарный XP</i>", ""]
+    for lvl in range(1, 16):
+        lines.append(
+            f"Ур. {lvl} — {prog.requirement(lvl)} XP "
+            f"(всего {prog.threshold(lvl + 1)})"
+        )
+    lines.append("")
+    lines.append("Дальше — требования продолжают расти (+20 XP за уровень к приросту).")
+    lines.append("В Owner-панели — полная таблица с пагинацией: /owner → ✨ XP и уровни.")
+    await message.answer("\n".join(lines))

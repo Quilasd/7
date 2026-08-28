@@ -20,30 +20,51 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
-def profile_text(user, header: bool = True, progression=None) -> str:
-    """Глобальный блок профиля (статистика User, не зависит от групп)."""
+def profile_text(user, header: bool = True, progression=None, ranks=None, extras=None) -> str:
+    """Компактный глобальный блок профиля (статистика User, не зависит от групп).
+
+    ranks: {'rating': int, 'wins': int, 'level': int} — позиции в рейтинге.
+    extras: {'title': str, 'event_reward': str, 'achievements': 'X/Y',
+             'win_streak': int, 'best_win_streak': int} — доп. блоки.
+    """
     from bot.services.progression import DEFAULT_PROGRESSION
 
     progression = progression or DEFAULT_PROGRESSION
+    ranks = ranks or {}
+    extras = extras or {}
     total = user.wins + user.losses
     winrate = (user.wins / total * 100) if total else 0.0
-    _, in_level, need = progression.xp_progress_in_level(user.xp)
-    lines = [
-        "🌐 <b>ГЛОБАЛЬНО</b>",
-        "",
-        f"⭐ Рейтинг: <b>{user.rating}</b>",
-        f"🎖 Уровень: <b>{user.level}</b>",
-        f"✨ XP: <b>{user.xp}</b> (до следующего уровня {in_level}/{need})",
-        f"🏆 Побед: <b>{user.wins}</b>",
-        f"💀 Поражений: <b>{user.losses}</b>",
-        f"🎮 Игр: <b>{user.games_played}</b>",
-        f"📈 Winrate: <b>{winrate:.0f}%</b>",
-        "",
-        f"☠️ Убийств: <b>{user.kills}</b>",
-        f"❤️ Спасений: <b>{user.saves}</b>",
-        f"🕵️ Расследований: <b>{user.investigations}</b>",
-        f"🗳 Правильных голосований: <b>{user.correct_votes}</b>",
-    ]
+
+    def _rank(key: str) -> str:
+        pos = ranks.get(key)
+        return f" <code>(#{pos})</code>" if pos else ""
+
+    from bot.utils.helpers import xp_progress_lines
+
+    # уровень выводится ИЗ XP — всегда согласован с прогресс-баром
+    level = progression.level_for_xp(max(0, user.xp))
+    lines = ["🌐 <b>ГЛОБАЛЬНО</b>", ""]
+    lines.append(f"⭐ Общий: <b>{user.rating}</b>{_rank('rating')}")
+    lines.append(f"🏆 Побед: <b>{user.wins}</b>{_rank('wins')}")
+    lines.append(f"📈 Уровень: <b>{level}</b>{_rank('level')}")
+    lines += xp_progress_lines(user.xp, progression)
+    lines.append("")
+    lines.append(
+        f"🎮 Игр: <b>{user.games_played}</b> · 💀 Поражений: <b>{user.losses}</b> · 📊 {winrate:.0f}%"
+    )
+    streak = extras.get("win_streak", 0)
+    best = extras.get("best_win_streak", 0)
+    lines.append(f"🔥 Серия: <b>{streak}</b> · 🏆 Лучшая: <b>{best}</b>")
+    badge_lines = []
+    if extras.get("title"):
+        badge_lines.append(f"🎓 Титул: {extras['title']}")
+    if extras.get("event_reward"):
+        badge_lines.append(f"🎪 Награда: {extras['event_reward']}")
+    if extras.get("achievements"):
+        badge_lines.append(f"🏅 Достижения: {extras['achievements']}")
+    if badge_lines:
+        lines.append("")
+        lines += badge_lines
     if header:
         head = [
             f"👤 <b>{esc(display_name(user))}</b>",
@@ -54,66 +75,166 @@ def profile_text(user, header: bool = True, progression=None) -> str:
     return "\n".join(lines)
 
 
-def profile_group_block(group, group_player, progression=None) -> str:
-    """Локальный блок: статистика игрока В КОНКРЕТНОЙ группе (GroupPlayer)."""
-    from bot.services.progression import DEFAULT_PROGRESSION
+def profile_group_block(group, group_player, progression=None, ranks=None) -> str:
+    """Компактный локальный блок: только рейтинг/победы/уровень с местами в группе.
 
-    progression = progression or DEFAULT_PROGRESSION
+    Без XP, winrate, поражений, серий и игровой статистики — они глобальные
+    и не дублируются (профиль не должен быть перегружен).
+    ranks: {'rating': int, 'wins': int, 'level': int} — позиции в топе группы.
+    """
+    ranks = ranks or {}
     gp = group_player
-    total = gp.wins + gp.losses
-    winrate = (gp.wins / total * 100) if total else 0.0
-    _, in_level, need = progression.xp_progress_in_level(gp.xp)
+
+    def _rank(key: str) -> str:
+        pos = ranks.get(key)
+        return f" <code>(#{pos})</code>" if pos else ""
+
+    title = esc(group.title) if getattr(group, "title", None) else "группа"
     return "\n".join([
-        f"🏠 <b>ЭТА ГРУППА</b>\n<i>{esc(group.title or '')}</i>\n",
-        f"⭐ Рейтинг: <b>{gp.rating}</b>",
-        f"🎖 Уровень: <b>{gp.level}</b>",
-        f"✨ XP: <b>{gp.xp}</b> (до следующего уровня {in_level}/{need})",
-        f"🏆 Побед: <b>{gp.wins}</b>",
-        f"💀 Поражений: <b>{gp.losses}</b>",
-        f"🎮 Игр: <b>{gp.games_played}</b>",
-        f"📈 Winrate: <b>{winrate:.0f}%</b>",
-        "",
-        f"☠️ Убийств: <b>{gp.kills}</b> · ❤️ Спасений: <b>{gp.saves}</b>",
-        f"🕵️ Расследований: <b>{gp.investigations}</b> · 🗳 Верный голос: <b>{gp.correct_votes}</b>",
+        f"🏠 <b>В ЭТОЙ ГРУППЕ</b> · <i>{title}</i>",
+        f"⭐ <b>{gp.rating}</b>{_rank('rating')} · 🏆 <b>{gp.wins}</b>{_rank('wins')}"
+        f" · 📈 Ур. <b>{gp.level}</b>{_rank('level')}",
     ])
 
 
+def profile_game_stats(user) -> str:
+    """Игровая статистика (глобальная) — отдельный блок внизу профиля."""
+    return "\n".join([
+        "⚔️ <b>В ИГРЕ</b>",
+        f"☠️ Убийств: <b>{user.kills}</b> · ❤️ Спасений: <b>{user.saves}</b>",
+        f"🕵️ Расследований: <b>{user.investigations}</b> · 🗳 Верных голосов: <b>{user.correct_votes}</b>",
+    ])
+
+
+def achievements_text(earned_ids: set[str]) -> str:
+    """Список ВСЕХ достижений: полученные/неполученные/скрытые.
+
+    Скрытые (hidden) до получения маскируются — «открой, чтобы узнать».
+    """
+    from bot.services import achievements as ach
+
+    items = ach.all_achievements()
+    earned = [a for a in items if a.id in earned_ids]
+    lines = [f"🏅 <b>ДОСТИЖЕНИЯ</b> — {len(earned)}/{len(items)}", ""]
+    for a in items:
+        if a.id in earned_ids:
+            lines.append(f"✅ {a.emoji} <b>{a.name}</b> — {a.description}")
+        elif a.hidden:
+            lines.append("❓ <i>Скрытое достижение</i> — открой, чтобы узнать")
+        else:
+            lines.append(f"⬜ {a.emoji} {a.name} — <i>{a.description}</i>")
+    lines.append("")
+    lines.append("<i>Достижения выдаются по итогам партий автоматически.</i>")
+    return "\n".join(lines)
+
+
+async def _earned_achievement_ids(session, user) -> set[str]:
+    from bot.database.repositories.social import UserAchievementRepository
+
+    return await UserAchievementRepository(session).ids_of(user.id)
+
+
+async def compute_profile_extras(session, user, services) -> dict:
+    """Ранги (глобальные) + титул/награда/достижения/серия для блока профиля."""
+    from bot.database.repositories.social import UserAchievementRepository
+    from bot.database.repositories.users import UserRepository
+    from bot.services import achievements as ach, titles as ttl
+
+    users = UserRepository(session)
+    ranks = {
+        "rating": await users.rank_by_rating(user.rating),
+        "wins": await users.rank_by_wins(user.wins),
+        "level": await users.rank_by_level(user.level, user.xp),
+    }
+    count = await UserAchievementRepository(session).count(user.id)
+    extras = {
+        "title": ttl.title_display(user.active_title),
+        "event_reward": await services.rewards.active_display(session, user),
+        "achievements": f"{count}/{ach.total_achievements()}",
+        "win_streak": int(getattr(user, "win_streak", 0) or 0),
+        "best_win_streak": int(getattr(user, "best_win_streak", 0) or 0),
+    }
+    return {"ranks": ranks, "extras": extras}
+
+
 def profile_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(
-            text="✏️ Изменить имя", callback_data=ProfileCB(action="name").pack()
-        ),
-        InlineKeyboardButton(
-            text="📜 Мои игры", callback_data=ProfileCB(action="games").pack()
-        ),
-    ]])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="✏️ Изменить имя", callback_data=ProfileCB(action="name").pack()
+            ),
+            InlineKeyboardButton(
+                text="📜 Мои игры", callback_data=ProfileCB(action="games").pack()
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="🏅 Достижения", callback_data=ProfileCB(action="achievements").pack()
+            ),
+        ],
+    ])
+
+
+async def _full_profile_text(session, services, db_user, group) -> str:
+    """Глобальный блок + локальный блок группы (если вызвали в группе)."""
+    from bot.database.repositories.groups import GroupPlayerRepository
+
+    data = await compute_profile_extras(session, db_user, services)
+    text = profile_text(db_user, ranks=data["ranks"], extras=data["extras"])
+    if group is not None:
+        group_repo = GroupPlayerRepository(session)
+        gp = await group_repo.get_membership(group.id, db_user.id)
+        if gp:
+            local_ranks = {
+                "rating": await group_repo.rank_in_group(group.id, "rating", gp.rating),
+                "wins": await group_repo.rank_in_group(group.id, "wins", gp.wins),
+                "level": await group_repo.rank_in_group(group.id, "level", gp.level, gp.xp),
+            }
+            text += "\n\n" + profile_group_block(group, gp, ranks=local_ranks)
+        else:
+            text += "\n\n🏠 Статистики в этой группе пока нет."
+    text += "\n\n━━━━━━━━━━━━━━━━━━\n\n" + profile_game_stats(db_user)
+    return text
 
 
 @router.message(Command("profile"))
-async def cmd_profile(message: Message, db_user) -> None:
-    await message.answer(profile_text(db_user), reply_markup=profile_kb())
+async def cmd_profile(message: Message, session, services, db_user, group=None) -> None:
+    """В группе показывает ОБА блока: 🌐 глобальный + 🏠 эта группа."""
+    await message.answer(
+        await _full_profile_text(session, services, db_user, group), reply_markup=profile_kb()
+    )
+
+
+@router.message(Command("achievements"))
+async def cmd_achievements(message: Message, session, db_user) -> None:
+    """Список всех достижений: что есть, что получено, что скрыто."""
+    await message.answer(achievements_text(await _earned_achievement_ids(session, db_user)))
 
 
 @router.callback_query(MenuCB.filter(F.action == "profile"))
-async def cb_profile(callback: CallbackQuery, session, db_user, group) -> None:
-    from bot.database.repositories.groups import GroupPlayerRepository
-
+async def cb_profile(callback: CallbackQuery, session, services, db_user, group) -> None:
     await callback.answer()
-    text = profile_text(db_user)
-    if group is not None:
-        gp = await GroupPlayerRepository(session).get_membership(group.id, db_user.id)
-        if gp:
-            text += "\n\n———\n\n" + profile_group_block(group, gp)
-        else:
-            text += "\n\n🏠 Статистики в этой группе пока нет."
-    await edit_or_answer(callback, text, profile_kb())
+    await edit_or_answer(
+        callback, await _full_profile_text(session, services, db_user, group), profile_kb()
+    )
+
+
+@router.callback_query(ProfileCB.filter(F.action == "achievements"))
+async def cb_achievements(callback: CallbackQuery, session, db_user) -> None:
+    await callback.answer()
+    await edit_or_answer(
+        callback, achievements_text(await _earned_achievement_ids(session, db_user)), profile_kb()
+    )
 
 
 @router.callback_query(MenuCB.filter(F.action == "settings"))
 @router.callback_query(ProfileCB.filter(F.action == "back"))
-async def cb_settings(callback: CallbackQuery, db_user) -> None:
+async def cb_settings(callback: CallbackQuery, session, services, db_user) -> None:
     await callback.answer()
-    await edit_or_answer(callback, profile_text(db_user), profile_kb())
+    data = await compute_profile_extras(session, db_user, services)
+    await edit_or_answer(
+        callback, profile_text(db_user, ranks=data["ranks"], extras=data["extras"]), profile_kb()
+    )
 
 
 @router.callback_query(ProfileCB.filter(F.action == "name"))

@@ -93,6 +93,14 @@ class User(Base):
     can_receive_dm: Mapped[bool] = mapped_column(Boolean, default=True)
     is_test: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
 
+    # 🔥 Серия побед (одна общая — любая победа продлевает, поражение сбрасывает)
+    win_streak: Mapped[int] = mapped_column(Integer, default=0)
+    best_win_streak: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Выбор пользователя (один активный титул / одна активная ивентовая награда)
+    active_title: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    active_event_reward_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
@@ -161,6 +169,14 @@ class Game(Base):
     vote_context: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # Журнал событий для статистики и разбора: [{type, ...}, ...]
     events: Mapped[list] = mapped_column(JSON, default=list)
+
+    # Форумные темы партии: game_chat_id/mafia_chat_id — ID ПОСТОЯННЫХ форумов,
+    # game_thread_id/mafia_thread_id — message_thread_id тем партии в них.
+    # (Старые игры: chat_id — отдельные чаты, thread_id NULL.)
+    game_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    mafia_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    game_thread_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    mafia_thread_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -286,10 +302,14 @@ class GroupPlayer(Base):
     rating: Mapped[int] = mapped_column(Integer, default=0)
     xp: Mapped[int] = mapped_column(Integer, default=0)
     level: Mapped[int] = mapped_column(Integer, default=1)
+    # 🔥 Локальная серия побед (в рамках этой группы)
+    win_streak: Mapped[int] = mapped_column(Integer, default=0)
+    best_win_streak: Mapped[int] = mapped_column(Integer, default=0)
 
     # Модерация внутри группы
-    warnings: Mapped[int] = mapped_column(Integer, default=0)
+    warnings: Mapped[int] = mapped_column(Integer, default=0)  # активные варны (синхронизируется с group_warnings)
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False)
+    banned_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # None = навсегда
 
     joined_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
@@ -340,6 +360,18 @@ class GroupSettingsModel(Base):
     global_rating_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     local_rating_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     debug_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Система варнов: лимит до авто-бана, срок жизни варна (часы), длительность авто-бана (мин)
+    warn_limit: Mapped[int] = mapped_column(Integer, default=3)
+    warn_expire_hours: Mapped[int] = mapped_column(Integer, default=168)      # 7 дней
+    warn_ban_minutes: Mapped[int] = mapped_column(Integer, default=1440)     # 24 часа
+    # 📌 ТЗ-11: форумы партий per-group. Игра группы использует ТОЛЬКО эти
+    # форумы; глобальные env-форумы — fallback исключительно для игр без группы.
+    game_forum_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    mafia_forum_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # 📌 Первичная настройка сервера (/setup): время последнего успешного
+    # прохождения проверки (бот-админ, can_manage_topics, форумные темы).
+    # NULL = группа ещё не настроена (базовая функциональность работает).
+    setup_completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
@@ -359,3 +391,182 @@ class AuditLog(Base):
     action: Mapped[str] = mapped_column(String(48))
     details: Mapped[str] = mapped_column(String(512), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+# --- Предсмертные записки, соцсеть, достижения, титулы, ивенты ---------------
+
+
+class GroupWarning(Base):
+    """Варн в группе: с причиной и сроком действия.
+
+    Активные варны (expires_at > now, не отозван) считаются в GroupPlayer.warnings;
+    при достижении лимита (GroupSettings.warn_limit) — авто-бан на время.
+    """
+
+    __tablename__ = "group_warnings"
+    __table_args__ = (
+        Index("ix_group_warnings_group_user", "group_id", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"))
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    actor_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    reason: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)  # срок действия варна
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)  # снят / израсходован авто-баном
+
+
+class DeathNote(Base):
+    """Предсмертная записка игрока в конкретной партии.
+
+    Одна на (game_id, user_id). text=None — игрок ещё не написал; публикуется
+    в утренней сводке (phase_manager). После записи текст неизменяем.
+    """
+
+    __tablename__ = "death_notes"
+    __table_args__ = (
+        UniqueConstraint("game_id", "user_id", name="uq_death_note"),
+        Index("ix_death_notes_pending", "game_id", "published"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    game_id: Mapped[int] = mapped_column(ForeignKey("games.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    text: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    death_day: Mapped[int] = mapped_column(Integer, default=0)
+    published: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class FriendRequest(Base):
+    """Исходящий запрос в друзья (ожидающий принятия)."""
+
+    __tablename__ = "friend_requests"
+    __table_args__ = (
+        UniqueConstraint("from_user_id", "to_user_id", name="uq_friend_request"),
+        Index("ix_friend_requests_to", "to_user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    from_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    to_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class Friendship(Base):
+    """Состоявшаяся дружба: две строки (A→B и B→A), снимаются парой."""
+
+    __tablename__ = "friendships"
+    __table_args__ = (
+        UniqueConstraint("user_id", "friend_id", name="uq_friendship"),
+        Index("ix_friendships_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    friend_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class UserBlock(Base):
+    """Игнор-лист: user_id игнорирует blocked_id."""
+
+    __tablename__ = "user_blocks"
+    __table_args__ = (
+        UniqueConstraint("user_id", "blocked_id", name="uq_user_block"),
+        Index("ix_user_blocks_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    blocked_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class FavoritePlayer(Base):
+    """Избранные игроки: только друзья (правило — SocialService.favorite)."""
+
+    __tablename__ = "favorite_players"
+    __table_args__ = (
+        UniqueConstraint("user_id", "favorite_id", name="uq_favorite"),
+        Index("ix_favorites_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    favorite_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class UserAchievement(Base):
+    """Полученные достижения (одноразовые: unique user+achievement)."""
+
+    __tablename__ = "user_achievements"
+    __table_args__ = (
+        UniqueConstraint("user_id", "achievement_id", name="uq_user_achievement"),
+        Index("ix_user_achievements_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    achievement_id: Mapped[str] = mapped_column(String(48))
+    awarded_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class UserTitle(Base):
+    """Открытые титулы игрока (через достижения / админом / ивентом)."""
+
+    __tablename__ = "user_titles"
+    __table_args__ = (
+        UniqueConstraint("user_id", "title_id", name="uq_user_title"),
+        Index("ix_user_titles_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    title_id: Mapped[str] = mapped_column(String(48))
+    source: Mapped[str] = mapped_column(String(24), default="achievement")
+    awarded_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class EventReward(Base):
+    """Каталог ивентовых наград/ролей (управляется администрацией).
+
+    kind: 'badge' (награда в профиль) или 'role' (временная ивентовая роль —
+    отдельна от игровых ролей). expires_days — срок действия по умолчанию.
+    """
+
+    __tablename__ = "event_rewards"
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_event_reward_code"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    code: Mapped[str] = mapped_column(String(48))
+    name: Mapped[str] = mapped_column(String(64))
+    emoji: Mapped[str] = mapped_column(String(16), default="🎪")
+    description: Mapped[str] = mapped_column(String(256), default="")
+    kind: Mapped[str] = mapped_column(String(16), default="badge")  # badge | role
+    expires_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_by: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class UserEventReward(Base):
+    """Выданные игроку ивентовые награды (несколько; одна активная в профиле)."""
+
+    __tablename__ = "user_event_rewards"
+    __table_args__ = (
+        Index("ix_user_event_rewards_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    reward_id: Mapped[int] = mapped_column(ForeignKey("event_rewards.id", ondelete="CASCADE"), index=True)
+    awarded_by: Mapped[int] = mapped_column(Integer, default=0)
+    awarded_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    reward: Mapped["EventReward"] = relationship(lazy="joined")

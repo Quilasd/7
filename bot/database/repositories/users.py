@@ -54,6 +54,34 @@ class UserRepository(BaseRepository[User]):
         )
         return list(result.scalars().all())
 
+    async def top_by_wins(self, limit: int = 10) -> list[User]:
+        result = await self.session.execute(
+            select(User)
+            .where(User.is_banned.is_(False), User.is_test.is_(False))
+            .order_by(User.wins.desc(), User.rating.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def top_by_level(self, limit: int = 10) -> list[User]:
+        result = await self.session.execute(
+            select(User)
+            .where(User.is_banned.is_(False), User.is_test.is_(False))
+            .order_by(User.level.desc(), User.xp.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def recent(self, limit: int = 10) -> list[User]:
+        """Последние зарегистрированные игроки."""
+        result = await self.session.execute(
+            select(User)
+            .where(User.is_banned.is_(False), User.is_test.is_(False))
+            .order_by(User.id.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
     async def count_all(self) -> int:
         result = await self.session.execute(
             select(func.count()).select_from(User).where(User.is_banned.is_(False), User.is_test.is_(False))
@@ -82,3 +110,33 @@ class UserRepository(BaseRepository[User]):
         await self.session.execute(
             update(User).where(User.id == user_id).values(can_receive_dm=False)
         )
+
+    # ----------------------------------------------------- место в рейтингах
+
+    async def rank_by_rating(self, rating: int) -> int:
+        result = await self.session.execute(
+            select(func.count()).select_from(User).where(
+                User.is_banned.is_(False), User.is_test.is_(False),
+                User.rating > rating,
+            )
+        )
+        return int(result.scalar_one()) + 1
+
+    async def rank_by_wins(self, wins: int) -> int:
+        result = await self.session.execute(
+            select(func.count()).select_from(User).where(
+                User.is_banned.is_(False), User.is_test.is_(False),
+                User.wins > wins,
+            )
+        )
+        return int(result.scalar_one()) + 1
+
+    async def rank_by_level(self, level: int, xp: int) -> int:
+        # выше те, у кого уровень больше, либо уровень равен, но XP больше
+        result = await self.session.execute(
+            select(func.count()).select_from(User).where(
+                User.is_banned.is_(False), User.is_test.is_(False),
+                ((User.level > level) | ((User.level == level) & (User.xp > xp))),
+            )
+        )
+        return int(result.scalar_one()) + 1

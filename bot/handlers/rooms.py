@@ -36,13 +36,34 @@ router = Router()
 # ------------------------------------------------------------------ создание
 
 @router.callback_query(MenuCB.filter(F.action == "create_room"))
-async def cb_create_start(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_create_start(
+    callback: CallbackQuery, state: FSMContext, session, services, db_user, group=None
+) -> None:
+    """Вход в полный визард создания комнаты (шаги 1–5: имя, максимум,
+    минимум, приватность, роли) — ОДИН и тот же flow для ЛС и группы.
+
+    Разница только в скоупе: из группы комната создаётся принадлежащей ЭТОЙ
+    группе (group_id в FSM-данных, изоляция ТЗ-11) и требует право START_GAME
+    (как /createroom); из ЛС — глобальной (group_id=None), доступно всем.
+    """
+    if group is not None:
+        from bot.services.permissions import Permission
+
+        access = await services.permissions.resolve(session, db_user.telegram_id, group.id)
+        if Permission.START_GAME not in access.permissions:
+            await callback.answer("⛔️ Нет права START_GAME", show_alert=True)
+            return
     await callback.answer()
     await state.clear()
+    if group is not None:
+        await state.update_data(group_id=group.id)
+        title = "🏠 <b>СОЗДАНИЕ КОМНАТЫ ГРУППЫ · шаг 1 из 5</b>"
+    else:
+        title = "🏠 <b>СОЗДАНИЕ КОМНАТЫ · шаг 1 из 5</b>"
     await state.set_state(RoomCreationStates.name)
     await edit_or_answer(
         callback,
-        "🏠 <b>СОЗДАНИЕ КОМНАТЫ · шаг 1 из 5</b>\n\n"
+        f"{title}\n\n"
         "Придумай название комнаты (3–64 символа).\n"
         "В любой момент: /cancel — отмена.",
     )
@@ -246,6 +267,8 @@ async def cb_noop(callback: CallbackQuery) -> None:
 async def cb_settings_done(callback: CallbackQuery, callback_data: RoomCB, state: FSMContext, services, db_user) -> None:
     if callback_data.room_id == 0:
         data = await state.get_data()
+        # визард, запущенный в группе, создаёт комнату ЭТОЙ группы (ТЗ-11);
+        # запущенный в ЛС — глобальную (group_id=None)
         room, message = await services.rooms.create_room(
             creator_user_id=db_user.id,
             name=data.get("name", "Комната"),
@@ -254,6 +277,7 @@ async def cb_settings_done(callback: CallbackQuery, callback_data: RoomCB, state
             is_private=bool(data.get("is_private", False)),
             password=data.get("password"),
             roles=dict(data.get("roles", {})),
+            group_id=data.get("group_id"),
         )
         await state.clear()
         if room is None:
@@ -309,10 +333,10 @@ async def cb_to_menu(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(RoomCB.filter(F.action == "find_refresh"))
-async def cb_find_refresh(callback: CallbackQuery, session, db_user) -> None:
+async def cb_find_refresh(callback: CallbackQuery, session, db_user, group=None) -> None:
     from bot.handlers.start import cb_play
 
-    await cb_play(callback, session, db_user)
+    await cb_play(callback, session, db_user, group=group)
 
 
 # -------------------------------------------------------------------- вход

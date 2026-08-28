@@ -9,7 +9,7 @@
   Игра:     /game /games /game_info /game_players /game_phase
             /game_start /game_stop /game_cancel /game_kill /game_revive
   Комнаты:  /rooms /room /room_close /room_kick /room_force_start
-  Персонал: /staff /staff_add /staff_remove /staff_promote /staff_demote /staff_info
+  Персонал: /staff /staff_add /staff_remove /staff_promote /staff_demote /staff_info /claim
   Настройки:/settings /set_min_players /set_max_players /set_night_time
             /set_day_time /set_vote_time /set_roles
   Массовые: /broadcast /announce
@@ -81,7 +81,7 @@ def _group_or_reply(event, group: Group | None):
 
 @router.message(Command("player", "player_stats"))
 async def cmd_player(message: Message, command: CommandObject, session, db_user, group, services) -> None:
-    from bot.handlers.profile import profile_group_block, profile_text
+    from bot.handlers.profile import _full_profile_text
 
     args = (command.args or "").strip()
     target = db_user
@@ -97,11 +97,8 @@ async def cmd_player(message: Message, command: CommandObject, session, db_user,
                 await _deny(message, Permission.VIEW_PROFILE)
                 return
         target = found
-    await message.answer(f"<b>{esc(display_name(target))}</b>\n\n{profile_text(target, header=False)}")
-    if group is not None:
-        gp = await GroupPlayerRepository(session).get_membership(group.id, target.id)
-        if gp:
-            await message.answer(profile_group_block(group, gp))
+    # единый полный профиль (глобальный блок + локальный группы + игровая статистика)
+    await message.answer(await _full_profile_text(session, services, target, group))
 
 
 @router.message(Command("players"))
@@ -117,7 +114,10 @@ async def cmd_players(message: Message, command: CommandObject, session, group, 
     for gp in players:
         staff = await GroupAdminRepository(session).get_for(group.id, gp.user_id)
         mark = LEVEL_TITLES.get(AdminLevel(staff.admin_level), "").split(" ", 1)[-1] if staff else ""
-        ban = " 🚫" if gp.is_banned else ""
+        if gp.is_banned and gp.banned_until is not None:
+            ban = f" ⏳до {gp.banned_until:%d.%m %H:%M}"
+        else:
+            ban = " 🚫" if gp.is_banned else ""
         warn = f" ⚠️{gp.warnings}" if gp.warnings else ""
         lines.append(f"• {esc(display_name(gp.user))} — 🎮{gp.games_played} ⭐{gp.rating}{warn}{ban} {mark}")
     await message.answer("\n".join(lines))
@@ -130,62 +130,249 @@ async def cmd_stats_alias(message: Message, command: CommandObject, session, db_
 
 # ---------------------------------------------------------------- модерация
 
-async def _moderation_target(message: Message, session, services, group, permission) -> tuple[object, object] | None:
-    """Общая часть: проверить право, найти цель, вернуть (access, target_user) или None."""
+async def _moderation_target(
+    message: Message, session, services, group, permission, punitive: bool = True
+) -> tuple[object, object] | None:
+    """Общая часть: проверить право, найти цель, вернуть (access, target_user) или None.
+
+    punitive=True (карательные команды) — дополнительно действует защита
+    иерархии: нельзя карать себя и уровень >= своего. Снимающие команды
+    (unmute/unwarn/unban) проверяют только право.
+    """
     access = await _require(session, services, message, group, permission)
     if access is None:
         return None
     if group is None:
         await message.answer("Команда работает только в группе.")
         return None
-    args = message.text.split(maxsplit=1)[1].strip() if len(message.text.split(maxsplit=1)) > 1 else ""
-    target = await _resolve_target(message, session, args or None)
+    target, _rest = await _target_and_rest(message, session)
     if target is None:
-        await message.answer("🤷 Укажи игрока: ID/@username или ответь на сообщение.")
+        cmd = message.text.split()[0] if message.text else "/команда"
+        await message.answer(
+            "🤷 Укажи игрока: его <b>ID</b>, <b>@username</b> "
+            "или ответь этой командой на его сообщение.\n\n"
+            f"Пример: <code>{cmd} @username</code> — либо ответь на сообщение игрока."
+        )
         return None
+    if punitive:
+        target_level = services.permissions.global_level(target.telegram_id)
+        if group is not None:
+            target_level = max(
+                target_level,
+                await services.permissions.group_level(session, group.id, target.telegram_id),
+            )
+        ok, why = services.permissions.can_moderate(
+            access, target_level, same_user=(target.telegram_id == message.from_user.id)
+        )
+        if not ok:
+            await message.answer(f"⛔️ {why}")
+            return None
     return access, target
+
+
+_DURATION_RE = None  # компилируется лениво ниже
+
+
+def _parse_duration(token: str) -> int | None:
+    """Срок в МИНУТАХ из токена: 30m / 2h / 3d / 1w / 2mo.
+
+    Единицы: m — минута, h — час, d — день, w — неделя, mo — месяц (30 дней).
+    Чистое число без суффикса считается минутами. None — токен не похож на срок.
+    """
+    import re
+
+    global _DURATION_RE
+    if _DURATION_RE is None:
+        _DURATION_RE = re.compile(r"^(\d+)\s*(mo|m|h|d|w|мин|ч|д|нед|мес)?$", re.IGNORECASE)
+    m = _DURATION_RE.match(token.strip())
+    if not m:
+        return None
+    value = int(m.group(1))
+    suffix = (m.group(2) or "m").lower()
+    minutes = {
+        "m": value, "мин": value,
+        "h": value * 60, "ч": value * 60,
+        "d": value * 24 * 60, "д": value * 24 * 60,
+        "w": value * 7 * 24 * 60, "нед": value * 7 * 24 * 60,
+        "mo": value * 30 * 24 * 60, "мес": value * 30 * 24 * 60,
+    }[suffix]
+    return minutes if minutes >= 1 else None
+
+
+def _human_duration(minutes: float) -> str:
+    """1440 -> '1 день', 90 -> '1 ч 30 мин', 43200 -> '1 месяц'."""
+    total = int(minutes)
+    if total >= 30 * 24 * 60 and total % (30 * 24 * 60) == 0:
+        n = total // (30 * 24 * 60)
+        return f"{n} мес." if n > 1 else "1 месяц"
+    if total >= 7 * 24 * 60 and total % (7 * 24 * 60) == 0:
+        n = total // (7 * 24 * 60)
+        return f"{n} нед." if n > 1 else "1 неделю"
+    if total >= 24 * 60 and total % (24 * 60) == 0:
+        n = total // (24 * 60)
+        return f"{n} дн." if n > 1 else "1 день"
+    if total >= 60:
+        h, m = total // 60, total % 60
+        head = f"{h} ч" if h > 1 else "1 час"
+        return f"{head} {m} мин" if m else head
+    return f"{total} мин"
+
+
+async def _target_and_rest(message: Message, session):
+    """Первый токен — цель, остальное — аргументы (срок + причина)."""
+    parts = (message.text or "").split(maxsplit=1)
+    args = parts[1].strip() if len(parts) > 1 else ""
+    tokens = args.split(maxsplit=1)
+    target = None
+    rest = args
+    if tokens:
+        target = await UserLookupService(session).resolve(query=tokens[0])
+        if target is not None:
+            rest = tokens[1].strip() if len(tokens) > 1 else ""
+    if target is None:
+        reply_id = (
+            message.reply_to_message.from_user.id
+            if message.reply_to_message and message.reply_to_message.from_user
+            else None
+        )
+        target = await UserLookupService(session).resolve(reply_telegram_id=reply_id)
+    return target, rest
 
 
 @router.message(Command("warn", "unwarn", "warnings"))
 async def cmd_warns(message: Message, session, group, db_user, services) -> None:
+    """Варны: причина + срок действия, N/N -> авто-бан на сутки.
+
+    /warn @user 3d спам в чате   — варн на 3 дня с причиной (30m/2h/3d/1w/2mo)
+    /warn @user спам             — срок по умолчанию (настройки группы, 7 дней)
+    /unwarn @user                — снять последний активный варн
+    /unwarn @user 12             — снять конкретный варн по его ID (виден в /warnings)
+    /warnings @user              — список активных с причинами и сроками
+    """
+    from datetime import timedelta
+
     command = message.text.split()[0][1:].split("@")[0]
     if command == "warnings":
         if await _require(session, services, message, group, Permission.VIEW_PLAYERS) is None:
             return
         target = await _resolve_target(message, session, (message.get_args() or "").strip() or None)
         if target is None:
-            await message.answer("🤷 Укажи игрока.")
+            await message.answer(
+                "🤷 Укажи игрока: ID, @username или ответь на сообщение.\n"
+                "Пример: <code>/warnings @username</code>"
+            )
             return
-        gp = await services.groups.local_player(group.id, target.id) if group else None
-        count = gp.warnings if gp else 0
-        await message.answer(f"⚠️ Предупреждений у {esc(display_name(target))}: {count}")
+        if group is None:
+            await message.answer("Команда работает только в группе.")
+            return
+        warns = await services.groups.warnings_of(group.id, target.id)
+        settings = await services.groups.get_settings(group.id)
+        limit = settings.warn_limit if settings else 3
+        if not warns:
+            await message.answer(
+                f"⚠️ Активных предупреждений у {esc(display_name(target))}: 0/{limit}."
+            )
+            return
+        lines = [f"⚠️ <b>Предупреждения {esc(display_name(target))} — {len(warns)}/{limit}:</b>", ""]
+        for w in warns:
+            reason = esc(w.reason) if w.reason else "<i>без причины</i>"
+            lines.append(f"• <code>#{w.id}</code> {reason} — истекает {w.expires_at:%d.%m %H:%M}")
+        lines.append("")
+        lines.append("Снять конкретный: <code>/unwarn @user 12</code> · последний: <code>/unwarn @user</code>")
+        await message.answer("\n".join(lines))
         return
 
-    permission = Permission.WARN_PLAYER
-    resolved = await _moderation_target(message, session, services, group, permission)
+    if command == "unwarn":
+        resolved = await _moderation_target(
+            message, session, services, group, Permission.WARN_PLAYER, punitive=False
+        )
+        if resolved is None:
+            return
+        _, target = resolved
+        # /unwarn @user 12 — снять конкретный варн по ID; без ID — последний
+        warn_id = None
+        _, rest = await _target_and_rest(message, session)
+        tokens = rest.split()
+        if tokens and tokens[0].lstrip("-").isdigit():
+            warn_id = int(tokens[0])
+        result = await services.groups.unwarn(group.id, target.id, db_user.id, warn_id=warn_id)
+        if result is None:
+            await message.answer(
+                f"❗ У {esc(display_name(target))} нет активного варна <code>#{warn_id}</code>. "
+                f"Актуальный список: <code>/warnings @{target.username or target.telegram_id}</code>"
+            )
+            return
+        which = f"варн <code>#{warn_id}</code>" if warn_id is not None else "последнее предупреждение"
+        await message.answer(
+            f"✅ Снято {which} у {esc(display_name(target))}. Активных: {result}."
+        )
+        return
+
+    resolved = await _moderation_target(message, session, services, group, Permission.WARN_PLAYER)
     if resolved is None:
         return
     _, target = resolved
-    delta = 1 if command == "warn" else -1
-    count = await services.groups.warn(group.id, target.id, db_user.id, delta)
-    verb = "выдано предупреждение" if delta > 0 else "снято предупреждение"
-    await message.answer(f"⚠️ {esc(display_name(target))}: {verb}. Всего: {count}")
+    _, rest = await _target_and_rest(message, session)
+    duration_minutes = None
+    reason = rest
+    tokens = rest.split(maxsplit=1)
+    if tokens:
+        parsed = _parse_duration(tokens[0])
+        if parsed is not None:
+            duration_minutes = parsed
+            reason = tokens[1].strip() if len(tokens) > 1 else ""
+    result = await services.groups.warn(
+        group.id, target.id, db_user.id, reason=reason, duration_minutes=duration_minutes
+    )
+    name = esc(display_name(target))
+    if result["auto_ban_until"] is not None:
+        # 3/3: локальный авто-бан уже поставлен сервисом; бан в самом Telegram
+        applied = False
+        if group is not None:
+            try:
+                await message.bot.ban_chat_member(
+                    group.telegram_chat_id, target.telegram_id,
+                    until_date=result["auto_ban_until"],
+                )
+                applied = True
+            except TelegramAPIError as exc:
+                logger.warning("авто-бан 3/3 в Telegram не удался: %s", exc)
+        tail = " (в Telegram не применён — боту нужны права админа)" if not applied else ""
+        await message.answer(
+            f"⚠️ {name}: <b>{result['limit']}/{result['limit']}</b> — авто-бан в группе "
+            f"на {_human_duration(result['ban_minutes'])} (до {result['auto_ban_until']:%d.%m %H:%M}).{tail}"
+        )
+        return
+    minutes_left = (result["warn"].expires_at - result["warn"].created_at).total_seconds() / 60
+    reason_line = f" Причина: <i>{esc(reason)}</i>." if reason else ""
+    await message.answer(
+        f"⚠️ {name}: предупреждение <b>{result['count']}/{result['limit']}</b>. "
+        f"Действует {_human_duration(minutes_left)}.{reason_line}"
+    )
 
 
 @router.message(Command("mute", "unmute"))
 async def cmd_mute(message: Message, session, group, db_user, services) -> None:
     command = message.text.split()[0][1:].split("@")[0]
-    resolved = await _moderation_target(message, session, services, group, Permission.MUTE_PLAYER)
+    resolved = await _moderation_target(
+        message, session, services, group, Permission.MUTE_PLAYER, punitive=(command == "mute")
+    )
     if resolved is None:
         return
     _, target = resolved
     mute = command == "mute"
     applied = False
     if mute and group is not None:
+        # срок: 30m / 2h / 3d / 1w / 2mo; чистое число = минуты (совместимость).
+        # По умолчанию — 60 минут; максимум — 366 дней.
         minutes = 60
-        parts = message.text.split()
-        if len(parts) >= 3 and parts[-1].isdigit():
-            minutes = max(1, min(1440, int(parts[-1])))
+        _, rest = await _target_and_rest(message, session)
+        tokens = rest.split(maxsplit=1)
+        if tokens:
+            parsed = _parse_duration(tokens[0])
+            if parsed is not None:
+                minutes = parsed
+        minutes = max(1, min(366 * 24 * 60, minutes))
         try:
             from datetime import datetime, timedelta, timezone
 
@@ -219,7 +406,7 @@ async def cmd_mute(message: Message, session, group, db_user, services) -> None:
     )
     await message.answer(
         f"🔇 {esc(display_name(target))}: {'мут' if mute else 'мут снят'}"
-        + (f" на {minutes} мин." if mute and applied else "")
+        + (f" на {_human_duration(minutes)}." if mute and applied else "")
         + ("" if applied else " (локальная запись; для мьюта в Telegram боту нужны права админа)")
     )
 
@@ -244,22 +431,89 @@ async def cmd_kick(message: Message, session, group, db_user, services) -> None:
 
 @router.message(Command("ban", "unban"))
 async def cmd_ban(message: Message, session, group, db_user, services) -> None:
+    """Бан — ТОЛЬКО Admin+ (у модератора доступа к бану нет).
+
+    /ban @user                — навсегда
+    /ban @user 30m|2h|3d|1w|2mo [причина] — бан на срок (мин/час/день/неделя/месяц)
+    /unban @user              — полный разбан (локальный + Telegram)
+    Авто-бан на сутки выдаётся системой при 3/3 активных варнах.
+    """
+    from datetime import timedelta
+
+    from bot.utils.helpers import utcnow
+
     command = message.text.split()[0][1:].split("@")[0]
+
+    if command == "unban":
+        resolved = await _moderation_target(
+            message, session, services, group, Permission.BAN_PLAYER, punitive=False
+        )
+        if resolved is None:
+            return
+        _, target = resolved
+        await services.groups.set_local_ban(group.id, target.id, False, db_user.id)
+        applied = False
+        if group is not None:
+            try:
+                await message.bot.unban_chat_member(
+                    group.telegram_chat_id, target.telegram_id, only_if_banned=True
+                )
+                applied = True
+            except TelegramAPIError as exc:
+                logger.warning("telegram-unban не удался: %s", exc)
+        await message.answer(
+            f"✅ {esc(display_name(target))} разбанен в этой группе"
+            + ("" if applied else " (в Telegram не поднят — боту нужны права админа)")
+            + "."
+        )
+        return
+
+    # --- бан: только BAN_PLAYER (Admin+)
     resolved = await _moderation_target(message, session, services, group, Permission.BAN_PLAYER)
     if resolved is None:
         return
-    _, target = resolved
-    banned, _ = await services.groups.set_local_ban(
-        group.id, target.id, command == "ban", db_user.id
-    )
-    if command == "ban" and group is not None:
+    access, target = resolved
+
+    _, rest = await _target_and_rest(message, session)
+    duration_minutes = None
+    reason = rest
+    tokens = rest.split(maxsplit=1)
+    if tokens:
+        parsed = _parse_duration(tokens[0])
+        if parsed is not None:
+            duration_minutes = parsed
+            reason = tokens[1].strip() if len(tokens) > 1 else ""
+
+    if duration_minutes is None:
+        until = None  # без срока — навсегда
+    else:
+        until = utcnow() + timedelta(minutes=duration_minutes)
+
+    await services.groups.set_local_ban(group.id, target.id, True, db_user.id, until=until)
+    applied = False
+    if group is not None:
         try:
-            await message.bot.ban_chat_member(group.telegram_chat_id, target.telegram_id)
+            await message.bot.ban_chat_member(
+                group.telegram_chat_id, target.telegram_id, until_date=until
+            )
+            applied = True
         except TelegramAPIError as exc:
             logger.warning("telegram-ban не удался: %s", exc)
-    await message.answer(
-        f"🚫 {esc(display_name(target))}: {'забанен' if banned else 'разбанен'} в этой группе."
-    )
+
+    name = esc(display_name(target))
+    if until is None:
+        head = f"🚫 {name}: бан в этой группе <b>навсегда</b>."
+    else:
+        head = (
+            f"🚫 {name}: бан в группе на <b>{_human_duration(duration_minutes)}</b> "
+            f"(до {until:%d.%m.%Y %H:%M})."
+        )
+    tail = ""
+    if not applied:
+        tail += " (в Telegram не применён — боту нужны права админа)"
+    if reason:
+        tail += f" Причина: <i>{esc(reason)}</i>."
+    await message.answer(head + tail)
 
 
 # --------------------------------------------------------------------- игра
@@ -343,7 +597,10 @@ async def cmd_game_kill(message: Message, command: CommandObject, session, group
         return
     args = (command.args or "").split()
     if len(args) < 2 or not args[0].isdigit():
-        await message.answer("Формат: /game_kill <game_id> <ID|@username>")
+        await message.answer(
+            f"💡 Формат: <code>/{command.command} &lt;game_id&gt; &lt;ID|@username&gt;</code>\n"
+            f"Пример: <code>/{command.command} 12 @username</code>"
+        )
         return
     game = await GameRepository(session).get(int(args[0]))
     if game is None:
@@ -429,7 +686,16 @@ async def cmd_room_manage(message: Message, command: CommandObject, session, gro
         return
     args = (command.args or "").split()
     if not args or not args[0].isdigit():
-        await message.answer(f"Формат: /{command.command} <room_id> [{'<user>}' if command.command == 'room_kick' else ''}]")
+        if command.command == "room_kick":
+            await message.answer(
+                "💡 Формат: <code>/room_kick &lt;room_id&gt; &lt;ID|@username&gt;</code>\n"
+                "Пример: <code>/room_kick 5 @username</code>"
+            )
+        else:
+            await message.answer(
+                f"💡 Формат: <code>/{command.command} &lt;room_id&gt;</code>\n"
+                f"Пример: <code>/{command.command} 5</code>"
+            )
         return
     rooms_repo = RoomRepository(session)
     room = await rooms_repo.get(int(args[0]))
@@ -448,7 +714,10 @@ async def cmd_room_manage(message: Message, command: CommandObject, session, gro
 
     if command.command == "room_kick":
         if len(args) < 2:
-            await message.answer("Формат: /room_kick <room_id> <ID|@username>")
+            await message.answer(
+                "💡 Формат: <code>/room_kick &lt;room_id&gt; &lt;ID|@username&gt;</code>\n"
+                "Пример: <code>/room_kick 5 @username</code>"
+            )
             return
         target = await UserLookupService(session).resolve(" ".join(args[1:]))
         if target is None:
@@ -499,6 +768,41 @@ async def cmd_create_group_room(message: Message, session, group, services, db_u
 
 # ----------------------------------------------------------------- персонал
 
+@router.message(Command("claim"))
+async def cmd_claim(message: Message, session, group, services, db_user) -> None:
+    """Забрать права создателя группы: выдаёт Senior Admin (4).
+
+    Доступ — только настоящему создателю Telegram-чата (status == "creator"),
+    проверяется через get_chat_member. Права выдаются локально в этой группе.
+    """
+    if group is None:
+        await message.answer("Эта команда работает только внутри группы.")
+        return
+    access = await _access(session, services, message.from_user.id, group)
+    if access.level >= AdminLevel.SENIOR_ADMIN:
+        await message.answer("уже есть права")
+        return
+    try:
+        member = await message.bot.get_chat_member(
+            chat_id=group.telegram_chat_id, user_id=message.from_user.id
+        )
+    except TelegramAPIError:
+        await message.answer("не удалось проверить, попробуй позже")
+        return
+    if member.status != "creator":
+        await message.answer("Право получает только создатель этой группы.")
+        return
+    ok, result = await services.groups.claim_creator(group.id, db_user.id)
+    await message.answer(("✅ " if ok else "") + esc(result))
+    if ok:
+        # показать создателю админ-команды группы в меню «/» (scope ChatMember)
+        from bot.utils.commands_menu import set_member_commands
+
+        await set_member_commands(
+            message.bot, group.telegram_chat_id, message.from_user.id, is_group_admin=True
+        )
+
+
 @router.message(Command("staff"))
 async def cmd_staff(message: Message, session, group, services) -> None:
     if await _require(session, services, message, group, Permission.VIEW_PLAYERS) is None:
@@ -527,7 +831,13 @@ async def cmd_staff_add(message: Message, command: CommandObject, session, group
         return
     args = (command.args or "").split()
     if len(args) < 2:
-        await message.answer("Формат: /staff_add <ID|@username> <уровень 1-4>")
+        await message.answer(
+            "👥 <b>Назначение администратора группы</b>\n\n"
+            f"💡 Формат: <code>/{command.command} &lt;ID|@username&gt; &lt;уровень 1-4&gt;</code>\n"
+            f"Пример: <code>/{command.command} @username 3</code>\n\n"
+            "Уровни: 1 🛟 Helper · 2 🔨 Moderator · 3 ⚙️ Admin · 4 🎖 Senior Admin\n"
+            "Игрока можно задать ID, @username или ответом на его сообщение."
+        )
         return
     target = await UserLookupService(session).resolve(args[0])
     if target is None:
@@ -557,7 +867,11 @@ async def cmd_staff_remove(message: Message, command: CommandObject, session, gr
     args = (command.args or "").split()
     target = await _resolve_target(message, session, args[0] if args else None)
     if target is None:
-        await message.answer("Формат: /staff_remove <ID|@username>")
+        await message.answer(
+            f"💡 Формат: <code>/{command.command} &lt;ID|@username&gt;</code>\n"
+            f"Пример: <code>/{command.command} @username</code>\n"
+            "Либо ответь этой командой на сообщение игрока."
+        )
         return
     access = await _access(session, services, message.from_user.id, group)
     ok, result = await services.groups.remove_staff(
@@ -576,7 +890,11 @@ async def cmd_staff_info(message: Message, command: CommandObject, session, grou
     args = (command.args or "").strip()
     target = await _resolve_target(message, session, args or None)
     if target is None:
-        await message.answer("Формат: /staff_info <ID|@username>")
+        await message.answer(
+            "💡 Формат: <code>/staff_info &lt;ID|@username&gt;</code>\n"
+            "Пример: <code>/staff_info @username</code>\n"
+            "Либо ответь этой командой на сообщение игрока."
+        )
         return
     row = await services.groups.get_staff_member(group.id, target.id)
     from bot.services.permissions import LEVEL_TITLES as T
@@ -587,6 +905,43 @@ async def cmd_staff_info(message: Message, command: CommandObject, session, grou
 
 # --------------------------------------------------------------- /settings
 
+
+def _server_status_lines(group, s, check=None) -> list[str]:
+    """Статус сервера для /settings: настроенность + Forum Topics.
+
+    check — опциональный живой SetupCheck (с проверкой прав Telegram);
+    без него статус берётся из БД (setup_completed_at / форумы партий).
+    """
+    from bot.utils.helpers import esc as _esc
+
+    configured = bool(getattr(s, "setup_completed_at", None))
+    lines = [
+        f"⚙️ <b>НАСТРОЙКИ MAFIA ONLINE</b>\n<i>{_esc(group.title or '')}</i>", "",
+        "Статус сервера:",
+        ("🟢 Настроен" if configured else "🟡 Не настроен — выполните /setup"),
+    ]
+    if check is not None:
+        lines.append("🟢 Forum Topics" if check.is_forum else "🔴 Темы форума отключены")
+        lines.append(
+            "🟢 Управление темами" if check.can_manage_topics
+            else "🔴 Нет права «Управление темами»"
+        )
+        lines.append(
+            "🟢 Бот — администратор" if check.is_admin else "🔴 Бот не администратор"
+        )
+    game_forum = getattr(s, "game_forum_chat_id", None)
+    mafia_forum = getattr(s, "mafia_forum_chat_id", None)
+    if game_forum or mafia_forum:
+        lines.append(
+            f"🟢 Форумы партий: игра <code>{game_forum or '—'}</code>, "
+            f"мафия <code>{mafia_forum or '—'}</code>"
+        )
+    else:
+        lines.append("⚪ Форумы партий не заданы — партии идут в ЛС (/set_game_forum)")
+    lines.append("")
+    return lines
+
+
 @router.message(Command("settings"))
 async def cmd_settings(message: Message, session, group, services) -> None:
     if await _require(session, services, message, group, Permission.MANAGE_SETTINGS) is None:
@@ -595,16 +950,24 @@ async def cmd_settings(message: Message, session, group, services) -> None:
         await message.answer("⚙️ Настройки группы доступны только внутри группы.")
         return
     settings = await services.groups.get_settings(group.id)
-    await message.answer(_settings_text(group, settings), reply_markup=_settings_kb())
+    # живой статус прав сервера (Telegram API), поверх статичного блока БД
+    check = None
+    setup_service = getattr(services, "setup", None)
+    if setup_service is not None:
+        try:
+            check = await setup_service.check(message.bot, group.telegram_chat_id)
+        except Exception:
+            check = None
+    await message.answer(
+        _settings_text(group, settings, check=check), reply_markup=_settings_kb()
+    )
 
 
-def _settings_text(group, s) -> str:
+def _settings_text(group, s, check=None) -> str:
     def onoff(value: bool) -> str:
         return "✅" if value else "⛔"
 
-    return "\n".join([
-        f"⚙️ <b>НАСТРОЙКИ ГРУППЫ</b>\n<i>{esc(group.title or '')}</i>",
-        "",
+    return "\n".join(_server_status_lines(group, s, check=check) + [
         f"👥 Игроки: {s.min_players}–{s.max_players}",
         f"⏱ Таймеры: 🌙{s.night_seconds}с ☀️{s.day_seconds}с 🗳{s.vote_seconds}с (обсуждение {s.discussion_seconds}с)",
         f"🎭 Роли: мафия ×{s.mafia_count}, маньяк {onoff(s.allow_maniac)}",
@@ -783,7 +1146,13 @@ async def cmd_set_number(message: Message, command: CommandObject, session, grou
         return
     args = (command.args or "").strip()
     if not args.isdigit():
-        await message.answer(f"Формат: /{command.command} <число>")
+        field_name, min_value, max_value = SETTING_COMMANDS[command.command]
+        unit = "сек" if "seconds" in field_name else ""
+        rng = f"{min_value}–{max_value} {unit}".strip()
+        await message.answer(
+            f"💡 Формат: <code>/{command.command} &lt;{rng}&gt;</code>\n"
+            f"Пример: <code>/{command.command} {min_value}</code>"
+        )
         return
     field, min_value, max_value = SETTING_COMMANDS[command.command]
     value = max(min_value, min(max_value, int(args)))
@@ -803,7 +1172,12 @@ async def cmd_set_roles(message: Message, command: CommandObject, session, group
         return
     args = (command.args or "").split()
     if len(args) != 2 or not args[1].isdigit():
-        await message.answer("Формат: /set_roles mafia 2  (или maniac on|off)")
+        await message.answer(
+            "💡 Формат:\n"
+            "<code>/set_roles mafia &lt;1-4&gt;</code> — число мафий\n"
+            "<code>/set_roles maniac on|off</code> — маньяк вкл/выкл\n\n"
+            "Пример: <code>/set_roles mafia 2</code> · <code>/set_roles maniac off</code>"
+        )
         return
     field, raw = args[0].lower(), args[1]
     if field == "mafia":
@@ -904,68 +1278,51 @@ async def cmd_maintenance(message: Message, session, services, group) -> None:
 
 _DEBUG_HELP_TEXT = """👑 <b>СПРАВОЧНИК ВЛАДЕЛЬЦА</b> (уровень 5)
 
+<b>👑 ПОДРОБНОЕ УПРАВЛЕНИЕ — ПАНЕЛЬ /owner</b>
+Кнопки: статистика, игроки, рейтинги, XP/уровни, достижения, титулы,
+ивенты, тестовая игра, debug, система, администрация.
+
 <b>ДИАГНОСТИКА ПРАВ</b>
 {diagnostics}
 
 <b>УРОВНИ АДМИНИСТРАЦИИ</b>
-0 👤 Player — обычный игрок
-1 🛟 Helper — просмотр, warn
-2 🔨 Moderator — + mute / kick / ban
-3 ⚙️ Admin — + комнаты, старт/стоп игры, DEBUG
-4 🎖 Senior Admin — + настройки, штат, broadcast
-5 👑 Owner — всё (OWNER_IDS в .env)
+0 👤 Player · 1 🛟 Helper — просмотр+мут · 2 🔨 Moderator — +варн/кик
+3 ⚙️ Admin — +бан, комнаты, игры, DEBUG · 4 🎖 Senior Admin — +настройки, штат
+5 👑 Owner — всё (OWNER_IDS). Ручная выдача рейтингов/XP/уровней/достижений — ТОЛЬКО Owner.
 
-<b>👤 ИГРОК</b> (все, везде)
-/play — меню · /profile — профиль 🌐+🏠 · /top — рейтинги
-/rules — правила · /help — помощь · /cancel — отмена
+<b>ОСНОВНЫЕ КОМАНДЫ</b>
+/start · /help · /profile · /stats · /history · /game_&lt;ID&gt; · /top /top_rating
+/top_wins /top_levels · /group_stats /global_stats · /achievements · /level_info
+/friend /accept /decline /unfriend /friends /requests · /ignore /unignore /ignored
+/favorite /unfavorite /favorites · /invite · /note · /cancel
+/titles /title_set · /rewards /reward_activate
 
-<code>Профиль/рейтинг в группе показывают и локальную 🏠 статистику.</code>
+<b>МОДЕРАЦИЯ</b> (группа; цель ID/@username/reply; нельзя карать себя и ≥ своего уровня)
+Единицы срока: 30m / 2h / 3d / 1w / 2mo
+/mute /unmute — Helper+ · /warn /unwarn [ID] /warnings — Moderator+
+/kick — Moderator+ · /ban [срок] /unban — ТОЛЬКО Admin+
 
-<b>📈 ПРОФИЛИ И СТАТИСТИКА</b>
-/player &lt;ID|@username|reply&gt; — {p1} VIEW_PROFILE
-/player_stats — аналог · /players — VIEW_PLAYERS
-/stats — своя статистика · /group_stats · /global_stats
-/top /top_rating /top_wins /top_levels — топы 🌐/🏠 с пагинацией
+<b>ГРУППА: ИГРА И КОМНАТЫ</b> (VIEW_STATS: /game /games /game_info /game_players
+/game_phase /rooms /room ID · START_GAME: /game_start /room_force_start /createroom
+STOP_GAME: /game_stop /game_cancel · MANAGE_ROOMS: /game_kill /game_revive
+/room_close /room_kick)
 
-<b>🔨 МОДЕРАЦИЯ</b> (в группе; цель — ID/@username/reply)
-/warn /unwarn /warnings — WARN_PLAYER
-/mute [мин] /unmute — MUTE_PLAYER (Telegram-мут, 1–1440 мин)
-/kick — KICK_PLAYER · /ban /unban — BAN_PLAYER
+<b>ШТАТ И НАСТРОЙКИ</b> (MANAGE_STAFF: /staff /staff_add /staff_promote /staff_remove
+/staff_demote /staff_info · /claim · MANAGE_SETTINGS: /settings /set_min_players
+/set_max_players /set_night_time /set_day_time /set_vote_time /set_roles)
 
-<b>🎮 ИГРА И КОМНАТЫ</b>
-/game — активная игра в группе · /games — список
-/game_info ID · /game_players · /game_phase
-/game_start — MANAGE_ROOMS · /game_stop /game_cancel — STOP_GAME
-/game_kill /game_revive — STOP_GAME
-/rooms · /room ID · /room_close · /room_kick · /room_force_start
-/createroom — комната с правилами группы — MANAGE_ROOMS
+<b>АДМИН И СИСТЕМА</b>
+/player /players — VIEW_PROFILE/VIEW_PLAYERS · /broadcast /announce /logs — BROADCAST
+/botstats — VIEW_STATS · /reload — OWNER+ADMIN_IDS · /maintenance — MANAGE_GLOBAL_SETTINGS
+/title_list /title_grant /title_remove · /reward_create /reward_grant /reward_list
 
-<b>👥 ШТАТ</b> (MANAGE_STAFF; защита: не ≥ своего уровня)
-/staff · /staff_add &lt;цель&gt; 1-4 · /staff_remove
-/staff_promote · /staff_demote · /staff_info
+<b>DEBUG MODE</b> (USE_DEBUG: Admin+ при debug_enabled группы; Owner — всегда)
+/testgame [4-8|fast] · /debug · /debug_game · /debug_state · /debug_phase · /debug_finish_phase
 
-<b>⚙️ НАСТРОЙКИ ГРУППЫ</b> (MANAGE_SETTINGS, только в группе)
-/settings — inline-меню (Игроки/Таймеры/Роли/Голосование/Рейтинг/XP/Доп.)
-/set_min_players /set_max_players · /set_night_time /set_day_time
-/set_vote_time · /set_roles mafia N|maniac on|off
-
-<b>📣 МАССОВЫЕ И СИСТЕМА</b>
-/broadcast /announce — BROADCAST (рассылка)
-/botstats — VIEW_STATS · /logs — BROADCAST
-/reload — OWNER_IDS+ADMIN_IDS · /maintenance — MANAGE_GLOBAL_SETTINGS
-
-<b>🧪 DEBUG MODE</b> (USE_DEBUG: Admin+ при debug_enabled группы; Owner — всегда)
-/testgame [4-8|fast] — тест-игра с ботами
-/testgame fast — таймеры по 5 сек
-/debug — статус · /debug_game ID · /debug_state
-/debug_phase · /debug_finish_phase
-
-<code>Статистика тест-игр меняется только при
-DEBUG_AFFECTS_GLOBAL/LOCAL_STATS=true в .env (по умолчанию выключены).</code>
-
-<b>👑 ТОЛЬКО ВЛАДЕЛЬЦУ</b>
-/debug_help — этот справочник
-/admin — админ-панель (OWNER_IDS + ADMIN_IDS)"""
+<b>👑 ТОЛЬКО ВЛАДЕЛЬЦУ</b> (команды; в панели /owner то же кнопками)
+/owner — панель · /debug_help — этот справочник · /admin — админ-панель
+/set_rating|add_rating · /set_wins|add_wins · /set_xp|add_xp · /set_level
+/achievement_grant /achievement_remove"""
 
 
 @router.message(Command("debug_help"))

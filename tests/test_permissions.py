@@ -24,11 +24,17 @@ class TestLevelPermissions:
     def test_progressive_permissions(self):
         from bot.services.permissions import LEVEL_PERMISSIONS as LP
 
-        assert Permission.WARN_PLAYER in LP[AdminLevel.HELPER]
-        assert Permission.MUTE_PLAYER not in LP[AdminLevel.HELPER]
-        assert Permission.MUTE_PLAYER in LP[AdminLevel.MODERATOR]
+        # мут — у Helper (обратимая мера), варна у Helper больше нет
+        assert Permission.MUTE_PLAYER in LP[AdminLevel.HELPER]
+        assert Permission.WARN_PLAYER not in LP[AdminLevel.HELPER]
+        # Moderator: варн + кик; бана НЕТ вообще
+        assert Permission.WARN_PLAYER in LP[AdminLevel.MODERATOR]
+        assert Permission.KICK_PLAYER in LP[AdminLevel.MODERATOR]
+        assert Permission.BAN_PLAYER not in LP[AdminLevel.MODERATOR]
         assert Permission.MANAGE_ROOMS not in LP[AdminLevel.MODERATOR]
         assert Permission.USE_DEBUG not in LP[AdminLevel.MODERATOR]
+        # Admin: + постоянный бан
+        assert Permission.BAN_PLAYER in LP[AdminLevel.ADMIN]
         assert {Permission.MANAGE_ROOMS, Permission.START_GAME, Permission.STOP_GAME,
                 Permission.USE_DEBUG} <= LP[AdminLevel.ADMIN]
         assert Permission.MANAGE_SETTINGS not in LP[AdminLevel.ADMIN]

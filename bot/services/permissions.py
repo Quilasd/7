@@ -52,7 +52,7 @@ class Permission(str, Enum):
     WARN_PLAYER = "WARN_PLAYER"
     MUTE_PLAYER = "MUTE_PLAYER"
     KICK_PLAYER = "KICK_PLAYER"
-    BAN_PLAYER = "BAN_PLAYER"
+    BAN_PLAYER = "BAN_PLAYER"  # бан группы (Admin+): со сроком или навсегда
     MANAGE_ROOMS = "MANAGE_ROOMS"
     START_GAME = "START_GAME"
     STOP_GAME = "STOP_GAME"
@@ -67,20 +67,23 @@ class Permission(str, Enum):
 
 LEVEL_PERMISSIONS: dict[AdminLevel, set[Permission]] = {
     AdminLevel.PLAYER: set(),
+    # Helper — только обратимые меры: мут (до 1440 мин)
     AdminLevel.HELPER: {
         Permission.VIEW_PROFILE, Permission.VIEW_PLAYERS, Permission.VIEW_STATS,
-        Permission.WARN_PLAYER,
+        Permission.MUTE_PLAYER,
     },
+    # Moderator — + варны (с причиной/сроком, 3/3 -> авто-бан на сутки) и кик.
+    # ДОСТУПА К БАНУ У МОДЕРАТОРА НЕТ.
     AdminLevel.MODERATOR: {
         Permission.VIEW_PROFILE, Permission.VIEW_PLAYERS, Permission.VIEW_STATS,
-        Permission.WARN_PLAYER, Permission.MUTE_PLAYER, Permission.KICK_PLAYER,
-        Permission.BAN_PLAYER,
+        Permission.MUTE_PLAYER, Permission.WARN_PLAYER, Permission.KICK_PLAYER,
     },
+    # Admin — + бан (со сроком или навсегда) и разбан
     AdminLevel.ADMIN: {
         Permission.VIEW_PROFILE, Permission.VIEW_PLAYERS, Permission.VIEW_STATS,
-        Permission.WARN_PLAYER, Permission.MUTE_PLAYER, Permission.KICK_PLAYER,
-        Permission.BAN_PLAYER, Permission.MANAGE_ROOMS, Permission.START_GAME,
-        Permission.STOP_GAME, Permission.USE_DEBUG,
+        Permission.MUTE_PLAYER, Permission.WARN_PLAYER, Permission.KICK_PLAYER,
+        Permission.BAN_PLAYER, Permission.MANAGE_ROOMS,
+        Permission.START_GAME, Permission.STOP_GAME, Permission.USE_DEBUG,
     },
     AdminLevel.SENIOR_ADMIN: {
         Permission.VIEW_PROFILE, Permission.VIEW_PLAYERS, Permission.VIEW_STATS,
@@ -160,6 +163,16 @@ class PermissionService:
         return permission in access.permissions
 
     # --------------------------------------------------- защита иерархии
+
+    def can_moderate(self, actor: ResolvedAccess, target_level: AdminLevel, same_user: bool) -> tuple[bool, str]:
+        """Модерация (warn/mute/kick/ban): нельзя карать себя и уровень >= своего.
+        Владелец (5) может всё, кроме другого владельца."""
+        if same_user:
+            return False, "Нельзя применить это к самому себе."
+        if target_level >= actor.level:
+            return False, "Нельзя применять к администратору с уровнем выше или равным вашему."
+        return True, "OK"
+
 
     def can_manage_staff_level(
         self, actor: ResolvedAccess, target_current: AdminLevel, new_level: AdminLevel, same_user: bool

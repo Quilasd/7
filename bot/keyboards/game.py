@@ -97,3 +97,13 @@ def game_status_keyboard(game: Game, game_player: GamePlayer) -> InlineKeyboardM
             )
         ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def death_note_keyboard(game_id: int) -> InlineKeyboardMarkup:
+    """Кнопка для написания предсмертной записки (показывается умершему)."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="📝 Написать предсмертную записку",
+            callback_data=GameCB(action="note", game_id=game_id).pack(),
+        )
+    ]])

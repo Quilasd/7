@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 
 from aiogram import F, Router
-from aiogram.types import CallbackQuery
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message
 
 from bot.database.repositories.games import GamePlayerRepository, GameRepository
 from bot.keyboards.game import (
@@ -15,6 +17,7 @@ from bot.keyboards.game import (
 )
 from bot.keyboards.room import confirm_kb
 from bot.roles import get_role
+from bot.states import NoteStates
 from bot.utils.callbacks import GameCB, NightCB, NightConfirmCB
 from bot.utils.helpers import display_name, esc
 from bot.utils.telegram import edit_or_answer
@@ -157,3 +160,86 @@ async def cb_game_leave_yes(callback: CallbackQuery, callback_data: GameCB, serv
     from bot.keyboards.common import back_to_menu_kb
 
     await edit_or_answer(callback, esc(result.message), back_to_menu_kb())
+
+
+# -------------------------------------------------------- предсмертная записка
+
+DEATH_NOTE_MAX = 300
+
+
+async def _save_note(session, game_id: int, user_id: int, text: str) -> tuple[bool, str]:
+    from bot.database.repositories.social import DeathNoteRepository
+
+    text = (text or "").strip()
+    if len(text) > DEATH_NOTE_MAX:
+        return False, f"Слишком длинно — до {DEATH_NOTE_MAX} символов."
+    note = await DeathNoteRepository(session).set_text(game_id, user_id, text)
+    if note is None:
+        return False, "Записку нельзя оставить: ты ещё не выбыл или уже написал её."
+    if not text:
+        return True, "☠️ Принято: ты ничего не успел сказать. Записка будет нейтральной."
+    return True, "📝 Предсмертная записка сохранена. Её прочтут утром (один раз, изменить нельзя)."
+
+
+@router.callback_query(GameCB.filter(F.action == "note"))
+async def cb_note(callback: CallbackQuery, callback_data: GameCB, state, services, db_user) -> None:
+    """Кнопка «написать записку» — переводит в режим ввода текста."""
+    from bot.states import NoteStates
+
+    async with services.session_factory() as session:
+        from bot.database.repositories.social import DeathNoteRepository
+        note = await DeathNoteRepository(session).get(callback_data.game_id, db_user.id)
+    if note is None:
+        await callback.answer("Ты не выбыл из этой игры — записка недоступна.", show_alert=True)
+        return
+    if note.text is not None:
+        await callback.answer("Ты уже написал записку — её нельзя изменить.", show_alert=True)
+        return
+    await callback.answer()
+    await state.set_state(NoteStates.text)
+    await state.update_data(game_id=callback_data.game_id)
+    await edit_or_answer(
+        callback,
+        f"📝 Напиши предсмертную записку (до {DEATH_NOTE_MAX} символов).\n"
+        "Опубликуется утром. Один раз, изменить нельзя.\n\n/cancel — отменить.",
+    )
+
+
+@router.message(Command("note"))
+async def cmd_note(message: Message, command, session, services, db_user) -> None:
+    """/note <текст> — записка для текущей активной игры (умерший игрок)."""
+    text = (command.args or "").strip()
+    active = await GamePlayerRepository(session).active_game_of_user(db_user.id)
+    if active is None:
+        await message.answer("У тебя нет активной игры для записки.")
+        return
+    if not text:
+        await message.answer(
+            f"📝 Напиши записку так: <code>/note твой текст</code> (до {DEATH_NOTE_MAX} символов). "
+            "Либо отправь пустую, если не хочешь ничего говорить."
+        )
+        return
+    ok, msg = await _save_note(session, active.game_id, db_user.id, text)
+    if ok:
+        await session.commit()
+    await message.answer(msg)
+
+
+@router.message(NoteStates.text)
+async def process_note(message: Message, state: FSMContext, session, db_user) -> None:
+    data = await state.get_data()
+    game_id = data.get("game_id")
+    if not game_id:
+        await state.clear()
+        return
+    ok, msg = await _save_note(session, int(game_id), db_user.id, message.text or "")
+    if ok:
+        await session.commit()
+    await state.clear()
+    await message.answer(msg)
+
+
+@router.message(Command("cancel"), NoteStates.text)
+async def cb_note_cancel(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("❌ Записка отменена. Написать можно позже командой /note.")

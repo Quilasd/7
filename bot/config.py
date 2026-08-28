@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     debug_affects_global_stats: bool = Field(default=False, validation_alias="DEBUG_AFFECTS_GLOBAL_STATS")
     debug_affects_local_stats: bool = Field(default=False, validation_alias="DEBUG_AFFECTS_LOCAL_STATS")
 
+    # --- Форумные чаты партий (topics вместо отдельных групп) ---------------
+    # Два ПОСТОЯННЫХ форумных супергрупп-чата: для игр и для мафии. Бот должен
+    # быть их администратором с правом can_manage_topics; темы создаёт сам.
+    # None/пусто — игровые темы отключены (игра идёт полностью в ЛС).
+    game_forum_chat_id: int | None = Field(default=None, validation_alias="GAME_FORUM_CHAT_ID")
+    mafia_forum_chat_id: int | None = Field(default=None, validation_alias="MAFIA_FORUM_CHAT_ID")
+
     # --- Игровые значения по умолчанию (переопределяются настройками комнаты)
     default_night_seconds: int = Field(default=90, validation_alias="DEFAULT_NIGHT_SECONDS")
     default_day_seconds: int = Field(default=180, validation_alias="DEFAULT_DAY_SECONDS")

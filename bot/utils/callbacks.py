@@ -107,3 +107,32 @@ class SettingCB(CallbackData, prefix="gset"):
 
     action: str  # menu | players | timers | roles | voting | progression | extra | set
     value: str = ""
+
+
+class HistoryCB(CallbackData, prefix="hist"):
+    """История игр: пагинация + детальный просмотр."""
+
+    action: str   # page | detail
+    page: int = 0
+    game_id: int = 0
+
+
+class OwnerCB(CallbackData, prefix="owner"):
+    """OWNER-панель (/owner). Доступен только OWNER_IDS — каждый handler
+    проверяет права на серверной стороне, независимо от callback_data."""
+
+    action: str   # main|stats|players|ratings|xp|achievements|titles|rewards|testgame|debug|system|staff|...
+    value: str = ""
+
+
+class SocialCB(CallbackData, prefix="soc"):
+    """Социальные действия: друзья/запросы/избранные/награды."""
+
+    action: str   # friends | requests | favorites | ignored | rewards | accept | decline | ...
+    value: str = ""
+
+
+class SetupCB(CallbackData, prefix="setup"):
+    """Первоначальная настройка сервера (/setup, кнопка «Проверить настройку»)."""
+
+    action: str  # check
