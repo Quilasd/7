@@ -73,7 +73,10 @@ class RoomService:
         is_private: bool,
         password: str | None,
         roles: dict[str, int],
+        group_id: int | None = None,
     ) -> tuple[Room | None, str]:
+        """Создание комнаты визардом. group_id=None — глобальная комната (ЛС),
+        group_id=<группы> — комната ЭТОЙ группы (визард, запущенный в группе)."""
         name = name.strip()[:64]
         if len(name) < 3:
             return None, "Название комнаты должно быть от 3 символов."
@@ -104,6 +107,7 @@ class RoomService:
                 password_hash=hash_password(password) if is_private else None,
                 status=RoomStatus.OPEN.value,
                 settings=defaults.model_dump(mode="json"),
+                group_id=group_id,
             )
             session.add(room)
             await session.flush()

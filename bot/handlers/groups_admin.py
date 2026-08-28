@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 
-from aiogram import F, Router
+from aiogram import Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -31,9 +31,8 @@ from bot.database.repositories.groups import GroupAdminRepository, GroupPlayerRe
 from bot.database.repositories.rooms import RoomRepository
 from bot.services.lookup import UserLookupService
 from bot.services.permissions import AdminLevel, LEVEL_TITLES, Permission
-from bot.utils.callbacks import RoomCB, SettingCB
+from bot.utils.callbacks import SettingCB
 from bot.utils.helpers import display_name, esc, utcnow
-from bot.utils.telegram import edit_or_answer
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -768,29 +767,6 @@ async def cmd_create_group_room(message: Message, session, group, services, db_u
 
 
 # ----------------------------------------------------------------- персонал
-
-@router.callback_query(RoomCB.filter(F.action == "group_room"))
-async def cb_create_group_room(
-    callback: CallbackQuery, session, group, services, db_user
-) -> None:
-    """Кнопка «🏠 Создать комнату» с экрана «Играть» — то же, что /createroom:
-    комната с правилами ЭТОЙ группы (право START_GAME, запись в аудит)."""
-    if group is None:
-        await callback.answer("Работает только в группе.", show_alert=True)
-        return
-    if await _require(session, services, callback, group, Permission.START_GAME) is None:
-        return
-    room, result = await services.groups.create_room_in_group(group.id, db_user.id)
-    if room is None:
-        await callback.answer(result[:180], show_alert=True)
-        return
-    await services.audit.log(db_user.id, "create_group_room", None, group.id, f"room={room.id}")
-    await callback.answer("✅ Комната группы создана")
-    from bot.keyboards.room import room_view_kb
-    from bot.services.game_view import room_text
-
-    await edit_or_answer(callback, room_text(room, room.players), room_view_kb(room, db_user.id))
-
 
 @router.message(Command("claim"))
 async def cmd_claim(message: Message, session, group, services, db_user) -> None:

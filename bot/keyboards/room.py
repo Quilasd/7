@@ -176,15 +176,18 @@ def rooms_list_kb(rooms: list[Room], user_room: Room | None) -> InlineKeyboardMa
 def play_empty_kb(in_group: bool) -> InlineKeyboardMarkup:
     """Пустой экран «Играть»: действия вместо тупика.
 
-    В группе — создание комнаты с правилами группы (то же, что /createroom)
-    и вход по ID; в ЛС — вход по ID (создание — кнопкой в главном меню).
+    «🏠 Создать комнату» ведёт в тот же полный визард, что и кнопка главного
+    меню (MenuCB create_room): в группе он создаёт комнату этой группы,
+    в ЛС — глобальную. «➕ По ID» — вход в существующую комнату по номеру.
     """
     rows: list[list[InlineKeyboardButton]] = []
     if in_group:
+        from bot.utils.callbacks import MenuCB
+
         rows.append([
             InlineKeyboardButton(
                 text="🏠 Создать комнату",
-                callback_data=RoomCB(action="group_room", room_id=0).pack(),
+                callback_data=MenuCB(action="create_room").pack(),
             )
         ])
     rows.append([
