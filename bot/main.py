@@ -16,7 +16,13 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ErrorEvent, Update
 
 from bot.config import get_settings
-from bot.database.database import create_engine, create_session_factory, dispose_engine, init_db
+from bot.database.database import (
+    create_engine,
+    create_session_factory,
+    dispose_engine,
+    init_db,
+    sync_derived_levels,
+)
 from bot.handlers import get_root_router
 from bot.middlewares import (
     GameChatGuardMiddleware,
@@ -137,6 +143,12 @@ async def create_app() -> tuple[Bot, Dispatcher, Services, TimerManager]:
 
     if settings.auto_create_tables:
         await init_db(services.engine)
+
+    # Самовосстановление кеша уровней: level обязан равняться f(xp) по текущей
+    # кривой (миграция 0006). Лечит БД, обновлённую через create_all без
+    # alembic: иначе /profile (уровень из XP) и рейтинги (сохранённый level)
+    # расходятся. Выполняется всегда — идемпотентно и дёшево.
+    await sync_derived_levels(services.engine)
 
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(get_root_router())
