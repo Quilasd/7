@@ -445,17 +445,27 @@ class GameChatService:
         Контекст = форум + тема. Игра ищется ТОЧНО по своей теме — параллельные
         партии в одном форуме не смешиваются. Завершённые игры тоже
         резолвятся (kind='closed'): в их темах писать нельзя.
+
+        thread_id is None — сообщение ВНЕ тем партий: общая (General) тема
+        форума или обычное сообщение супергруппы. Telegram НЕ присылает
+        message_thread_id для сообщений General-темы, поэтому None — это
+        «не игровая тема», а не «любая тема»: раньше такой запрос матчил
+        ЛЮБУЮ игру этого чата (game_thread_id IS NOT NULL) и завершённая
+        партия «отравляла» весь основной чат — бот удалял там сообщения
+        навсегда (ложный «вечный мут» после конца игры).
         """
+        if thread_id is None:
+            return None
         stmt = select(Game).where(
             Game.game_chat_id == chat_id,
-            Game.game_thread_id == thread_id if thread_id is not None else Game.game_thread_id.isnot(None),
+            Game.game_thread_id == thread_id,
         )
         game = (await session.execute(stmt)).scalars().first()
         if game is not None:
             return game, "game"
         stmt = select(Game).where(
             Game.mafia_chat_id == chat_id,
-            Game.mafia_thread_id == thread_id if thread_id is not None else Game.mafia_thread_id.isnot(None),
+            Game.mafia_thread_id == thread_id,
         )
         game = (await session.execute(stmt)).scalars().first()
         if game is not None:

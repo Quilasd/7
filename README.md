@@ -392,6 +392,11 @@ Owner (уровень 5 назначается только через `OWNER_ID
 
 - **Профили:** `/player /player_stats /stats /players` (чужие профили — VIEW_PROFILE)
 - **Модерация:** `/warn /unwarn /warnings /mute /unmute /kick /ban /unban`
+  (`/mute`/`/unmute`, помимо основного чата, зеркалит restriction в форумы
+  партий этой группы (`game_forum_chat_id`/`mafia_forum_chat_id`, если они —
+  отдельные чаты): restrictChatMember действует на весь чат, поэтому без
+  зеркала замученный в группе игрок мог бы писать в темах партий; всё
+  best-effort — сбой форума логируется и не ломает команду)
 - **Игра:** `/game /games /game_info /game_players /game_phase /game_start /game_stop /game_cancel /game_kill /game_revive`
 - **Комнаты:** `/rooms /room /room_close /room_kick /room_force_start /createroom`
 - **Штат:** `/staff /staff_add /staff_remove /staff_promote /staff_demote /staff_info` · `/claim` — создатель группы (Telegram `status="creator"`) забирает права 🎖 Senior Admin (4) локально в этой группе, без требования MANAGE_STAFF; повторный `/claim` и вызов уже-Senior — no-op, в аудит пишется `group_claim`

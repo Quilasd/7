@@ -351,6 +351,32 @@ async def cmd_warns(message: Message, session, group, db_user, services) -> None
     )
 
 
+async def _group_forum_chats(session, group) -> list[int]:
+    """Форумные чаты партий ЭТОЙ группы, отличные от её основного чата.
+
+    restrictChatMember действует на весь чат: в основном чате группы мут
+    уже покрывает и его темы (включая темы партий, когда форумы
+    автозаполнены самой группой). Отдельные форумные чаты (per-group
+    /set_game_forum) ограничение основной группы НЕ покрывают — мут нужно
+    зеркалить туда отдельно, иначе замученный игрок продолжает писать
+    в темах партий.
+    """
+    if group is None:
+        return []
+    from bot.database.repositories.groups import GroupSettingsRepository
+
+    settings = await GroupSettingsRepository(session).get_for(group.id)
+    if settings is None:
+        return []
+    chats = {
+        settings.game_forum_chat_id,
+        settings.mafia_forum_chat_id,
+    }
+    chats.discard(group.telegram_chat_id)
+    chats.discard(None)
+    return sorted(chats)
+
+
 @router.message(Command("mute", "unmute"))
 async def cmd_mute(message: Message, session, group, db_user, services) -> None:
     command = message.text.split()[0][1:].split("@")[0]
@@ -373,10 +399,10 @@ async def cmd_mute(message: Message, session, group, db_user, services) -> None:
             if parsed is not None:
                 minutes = parsed
         minutes = max(1, min(366 * 24 * 60, minutes))
-        try:
-            from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta, timezone
 
-            until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+        until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+        try:
             await message.bot.restrict_chat_member(
                 chat_id=group.telegram_chat_id,
                 user_id=target.telegram_id,
@@ -386,6 +412,21 @@ async def cmd_mute(message: Message, session, group, db_user, services) -> None:
             applied = True
         except TelegramAPIError as exc:
             logger.warning("mute %s в %s не удался: %s", target.telegram_id, group.telegram_chat_id, exc)
+        # мут обязан действовать и в темах партий: форумы группы — отдельные
+        # чаты, ограничение основной группы их не покрывает (best-effort)
+        for forum_chat_id in await _group_forum_chats(session, group):
+            try:
+                await message.bot.restrict_chat_member(
+                    chat_id=forum_chat_id,
+                    user_id=target.telegram_id,
+                    until_date=until,
+                    can_send_messages=False,
+                )
+            except TelegramAPIError as exc:
+                logger.warning(
+                    "mute %s в форуме %s не удался: %s",
+                    target.telegram_id, forum_chat_id, exc,
+                )
     elif not mute and group is not None:
         try:
             await message.bot.restrict_chat_member(
@@ -399,6 +440,22 @@ async def cmd_mute(message: Message, session, group, db_user, services) -> None:
             applied = True
         except TelegramAPIError as exc:
             logger.warning("unmute %s не удался: %s", target.telegram_id, exc)
+        # снять зеркальный мут с форумных чатов группы (best-effort)
+        for forum_chat_id in await _group_forum_chats(session, group):
+            try:
+                await message.bot.restrict_chat_member(
+                    chat_id=forum_chat_id,
+                    user_id=target.telegram_id,
+                    can_send_messages=True,
+                    can_send_other_messages=True,
+                    can_add_web_page_previews=True,
+                    can_invite_users=True,
+                )
+            except TelegramAPIError as exc:
+                logger.warning(
+                    "unmute %s в форуме %s не удался: %s",
+                    target.telegram_id, forum_chat_id, exc,
+                )
 
     await services.audit.log(
         db_user.id, command, target.id, group.id if group else None,
