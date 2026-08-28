@@ -4,6 +4,7 @@ from aiogram import Router
 
 from bot.handlers import (
     admin,
+    cmdhelp,
     game,
     game_chats,
     owner,
@@ -24,6 +25,7 @@ from bot.handlers import (
 def get_root_router() -> Router:
     root = Router(name="root")
     root.include_router(admin.router)
+    root.include_router(cmdhelp.router)
     root.include_router(owner.router)
     root.include_router(testgame.router)
     root.include_router(rewards.router)

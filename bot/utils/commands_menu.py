@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 #: Команды для всех пользователей (личные чаты, scope по умолчанию)
 USER_COMMANDS: list[BotCommand] = [
     BotCommand(command="start", description="🧭 Главное меню"),
+    BotCommand(command="cmdhelp", description="📖 Все команды бота"),
     BotCommand(command="profile", description="👤 Профиль: 🌐 глобально + 🏠 группа"),
     BotCommand(command="stats", description="📊 Моя статистика"),
     BotCommand(command="top", description="🏆 Рейтинги: 🌐 глобальный / 🏠 группы"),
